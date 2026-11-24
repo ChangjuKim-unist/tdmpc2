@@ -26,7 +26,6 @@ from common import math as tdmath
 
 D01 = '/mnt/newssd/cjkim/td/d01'
 OUT = '/mnt/newssd/cjkim/td/d02'
-OFFICIAL_OUT = OUT
 CELLS = ['walker-run__mass_1.5', 'walker-run__friction_0.15', 'quadruped-run__motor_0.35',
 		 'quadruped-run__friction_0.15', 'cheetah-run__mass_2.0', 'cheetah-run__friction_0.15']
 FAIL_CELLS = ['walker-run__friction_0.15', 'quadruped-run__motor_0.35', 'quadruped-run__friction_0.15',
@@ -591,7 +590,7 @@ def cmd_summarize(a):
 				L.append(f"- {c}: " + ', '.join(f"{arm} L {v['L_d01']:.3f}→{v['L_now']:.3f}, C {v['C_d01']:.3f}→{v['C_now']:.3f}" for arm, v in pr[c]['d01_check'].items()) + f", 복원 결정성 최대 차이 {pr[c]['det_max_abs']:.1e}")
 	out.update(rho={f'{c}|{arm}': v for (c, arm), v in rho.items()}, dfall={f'{c}|{arm}': v for (c, arm), v in dfall.items()},
 			   es_steps=es_steps, anc_lam=lam)
-	dst = os.path.join(d01.REPO, 'research', 'results', 'd02') if OUT == OFFICIAL_OUT else os.path.join(OUT, 'summary')
+	dst = os.path.join(OUT, 'summary')  # copied into research/results/d02 from the workstation (avoids root-owned files in the repo)
 	os.makedirs(dst, exist_ok=True)
 	open(os.path.join(dst, 'summary.md'), 'w').write('\n'.join(L) + '\n')
 	dump(os.path.join(dst, 'summary.json'), out)
