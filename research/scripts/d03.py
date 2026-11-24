@@ -120,13 +120,14 @@ def cmd_refit(a):
 		pi_info = agent.update_pi(zs.reshape(1, (K + 1) * B, L), None)
 		m.soft_update_target_Q()
 		m.eval()
-		if step % 500 == 0 or step == 1:
+		if step % 500 == 0 or step == 1 or step == steps:
 			with torch.no_grad():
 				act, _ = m.pi(chk, None)
 				qm = float(tdmath.two_hot_inv(m.Q(chk, act, None, return_type='all'), cfg).mean())
 			log.append(dict(step=step, q_loss=float(q_loss), pi_loss=float(pi_info['pi_loss']), q_mean=qm,
 							td_mean=float(td.mean()), r_mean=float(r.mean())))
 			print(a.cell, a.arm, log[-1], f'{time.time() - t0:.0f}s', flush=True)
+	os.makedirs(f'{OUT}/{a.cell}', exist_ok=True)
 	agent.save(f'{OUT}/{a.cell}/{a.arm}.pt')
 	dump(f'{OUT}/{a.cell}/refit_{a.arm}.json', dict(log=log, seconds=time.time() - t0, q_mean_at_load=float(q_on.mean())))
 
