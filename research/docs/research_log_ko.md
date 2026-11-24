@@ -5,3 +5,4 @@
 | 번호 | 날짜 | 문서 | 내용 | 결과 | 결과 위치 |
 |---|---|---|---|---|---|
 | 0 | 2026-11-24 | (준비, 등록 없음) | gpu1에 공식 TD-MPC2 설치, 공개 단일 과제 체크포인트(seed 1) 재현 확인. 10 에피소드 평가 | walker-run 870.9 (논문 868.1), quadruped-run 955.2 (951.5), cheetah-run 843.4 (848.3) → 1 % 안에서 재현. dog-run 756.3 (859.1)은 낮아 기준 과제에서 뺌. 평가 1회 약 2분 | research/results/repro/ |
+| 1 | 2026-11-24 | research/docs/design01_adapt_failure_recurrence_ko.md | (등록) K2: TD-MPC2(walker·quadruped·cheetah-run)를 물리 변화 조건에서 실데이터 10 에피소드로 fine-tuning하면 잃은 return을 못 되찾거나 넘어짐이 느는가, 그때 수준 오차만 주고 행동 효과 오차는 덜 주는가. K1: 다른 보폭의 비슷한 상태끼리 짝지은 ±δ 흔들기로 실측 fork 목표의 신호 대 잡음비가 1 이상인가 | (미실행) | /mnt/newssd/cjkim/td/d01/, research/results/d01/ |
