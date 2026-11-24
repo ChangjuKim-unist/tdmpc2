@@ -1,0 +1,34 @@
+{
+ "cells": [
+  "walker-run__mass_1.5",
+  "walker-run__friction_0.15",
+  "quadruped-run__motor_0.35",
+  "quadruped-run__friction_0.15",
+  "cheetah-run__mass_2.0",
+  "cheetah-run__friction_0.15"
+ ],
+ "k2a": [
+  false,
+  true,
+  true,
+  true,
+  false,
+  true
+ ],
+ "k2b": [
+  false,
+  false,
+  true,
+  true,
+  true,
+  true
+ ],
+ "k1": [
+  false,
+  false,
+  false,
+  false,
+  false,
+  false
+ ]
+}
