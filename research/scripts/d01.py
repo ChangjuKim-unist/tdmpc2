@@ -566,12 +566,12 @@ def cmd_summarize(a):
 			arm_rows.append(f'| {cell} | ' + ' | '.join(f"{_rets(evs[k], 'shift').mean():.0f} ({_mean(evs[k], 'shift', 'falls'):.1f})" for k in evs) + ' |')
 			nom_rows.append(f'| {cell} | ' + ' | '.join(f"{_rets(evs[k], 'nominal').mean():.0f} ({_mean(evs[k], 'nominal', 'falls'):.1f})" for k in evs) + ' |')
 			q_rows.append(f'| {cell} | ' + ' | '.join(f"{_mean(evs[k], 'shift', 'smooth'):.3f} / {_mean(evs[k], 'shift', 'effort'):.2f} / {_mean(evs[k], 'shift', 'angvel_rms'):.2f}" for k in evs) + ' |')
-			p4.append(_rets(evs['D8000'], 'shift').mean() < _rets(evs['D2000'], 'shift').mean())
+			p4.append(bool(_rets(evs['D8000'], 'shift').mean() < _rets(evs['D2000'], 'shift').mean()))
 		p16, d16 = _load(f'{OUT}/{cell}/eval_PRE_it16.json'), _load(f'{OUT}/{cell}/eval_D2000_it16.json')
 		if pre and d2 and p16 and d16:
 			dp = _rets(pre, 'shift').mean() - _rets(p16, 'shift').mean()
 			dd = _rets(d2, 'shift').mean() - _rets(d16, 'shift').mean()
-			p5.append(dd > dp)
+			p5.append(bool(dd > dp))
 			it_rows.append(f'| {cell} | {dp:.0f} | {dd:.0f} |')
 		k2 = _load(f'{OUT}/{cell}/probe_k2.json')
 		if k2 and 'PRE' in k2 and 'D2000' in k2:
@@ -579,7 +579,7 @@ def cmd_summarize(a):
 			rL, rC = 1 - Lf / Lp, 1 - Cf / Cp
 			flag = bool(rL >= 0.3 and rC <= rL / 2)
 			k2b_flags.append(flag)
-			p2.append(rL >= 0.3)
+			p2.append(bool(rL >= 0.3))
 			k2b_rows.append(f"| {cell} | {Lp:.3f} → {Lf:.3f} | {Cp:.3f} → {Cf:.3f} | {rL:.2f} | {rC:.2f} | {k2['PRE']['1']['C']:.3f} → {k2['D2000']['1']['C']:.3f} | {'그렇다' if flag else '-'} |")
 		k1 = _load(f'{OUT}/{cell}/probe_k1.json')
 		if k1 and pre:
@@ -592,11 +592,11 @@ def cmd_summarize(a):
 				drop = 1 - _rets(ev, 'shift').mean() / r0
 				dfall = _mean(ev, 'shift', 'falls') - f0
 				r = k1[str(dlt)]
-				good = drop <= 0.05 and dfall <= 0.2 and max(r['R'], r['R_c']) >= 1.0
+				good = bool(drop <= 0.05 and dfall <= 0.2 and max(r['R'], r['R_c']) >= 1.0)
 				ok = ok or good
-				p7.append(r['R_rand'] < r['R'])
+				p7.append(bool(r['R_rand'] < r['R']))
 				if dlt == 0.1:
-					p8.append(drop <= 0.05 and dfall <= 0.2)
+					p8.append(bool(drop <= 0.05 and dfall <= 0.2))
 				k1_rows.append(f"| {cell} | {dlt} | {r['R']:.2f} | {r['R_c']:.2f} | {r['R_rand']:.2f} | {100 * drop:.1f} % | {dfall:+.1f} | {'예' if good else '-'} |")
 			k1_flags.append(ok)
 	n = len(cells)
