@@ -52,3 +52,36 @@
 ## 출처
 
 sft-JEPA 2611.29453, Fork-JEPA 2611.28350, Zhang et al. 2607.22430, GALILEO 2206.04890, 2611.13592, TERRA 2610.38657, Sandwich-Residuals 2609.21740, Reflexive World Models 2505.15589, SGAT 2008.01281, ASAP 2502.01143, L1-MBRL 2403.14860, 2610.04896, AD-WM 2609.30264, pico-WAM 2611.01039, ARC-Bench 2609.05461, VaGraM 2204.01464, ASID 2404.12308, SPI-Active 2505.14266, Petrik et al. 1607.03842, ARMOR 2302.11048, ATAC 2202.02446, ME-TRPO 1802.10592, SPOWL 2506.04828, BROIL 2007.12315, 1611.06426, Yang et al. 2203.02638, ABS 2401.17583, UNISafe 2505.00779, 2303.03374, 2611.23118, MSG 2205.13703, FOWM 2310.16029, PIA 2610.26757, ReDRAW 2504.02252
+
+## 6. 추가 확인 (2026-11-25 오후, 설계 04의 핵심 두 셀 결과 뒤): 가치 쪽 방법
+
+설계 04에서 "정확한 dynamics여도 나쁘다"가 나온 뒤, 그 진단과 가치 쪽 방법 후보 하나를 확인했다. "본문"은 논문 본문에서 읽은 것, "초록"은 초록만 읽은 것이다.
+
+### 6.1 진단: 정확한 dynamics + 낡은 terminal 가치가 적응 없음보다 나쁘다
+
+| 논문 | 한 것 | 우리와의 차이 |
+|---|---|---|
+| SGFT (2502.02705, 본문) | 실제 H스텝 + sim 가치를 terminal로 쓴다(TD-MPC2 판 포함). 조건으로 "V_sim is improvable with respect to M_real"을 두고 성립한다고 가정 | 가정이 깨지는 경우를 재지 않았다. 설계 04는 그 반례다 |
+| SimDist (2603.15759, 본문) | "freezing reward and value models can cap performance … may require selectively updating value functions" | 한계로만 언급. 해가 된다는 측정 없음 |
+| Hamrick et al. (2011.04021, 본문) | MuZero에서 학습 모델을 simulator로 교체. simulator가 조금 낫다 | 물리 변화 없음. simulator 쪽이 나빠지지 않았다 |
+| Bhardwaj et al. (2012.05909) | H스텝 MPC의 오차 한계: 모델 오차 항 + 가치 오차 항 | 식뿐이다 |
+| HuRL (2106.02757, 본문) | improvable heuristic 개념, "Pessimistic heuristics are good heuristics" | 이론, model-free |
+| PIA (2610.26757, 본문) | "value function estimates may reflect simulator-prior bias" | 한 문장 |
+
+- 판정: 이웃 설정에 발표. "바뀐 조건의 정확한 dynamics + sim 가치가 완전히 낡은 planner보다 나쁘다"는 측정은 찾지 못했다.
+- 예상 반박: "SGFT의 improvable 조건 위반일 뿐이다." 우리 쪽 답: 그 조건이 실제로 깨지고, 깨지면 적응 없음보다 나빠진다는 것을 처음 잰다.
+
+### 6.2 방법 후보: dynamics fine-tuning + 데이터를 모은 planner의 실제 return으로 맞춘 terminal 가치
+
+| 논문 | 한 것 | 우리와의 차이 |
+|---|---|---|
+| LMPC (1609.01387, 1901.08184, 초록) | 이전 주행의 실현 비용을 terminal 비용으로, 지나간 상태를 안전 집합으로 쓴다. 모델 식별 병행. 주행마다 나빠지지 않는다는 보장 | 기제가 같다. 반복 과제, sim 사전학습 가치 없음, world model 아님 |
+| SAVED (1905.13402, 본문) | 학습 dynamics + 현재 정책의 terminal 비용 + 안전 집합 밀도 제약 + CEM | 시연에서 시작, 이후 TD. sim-to-real 아님 |
+| 2610.38731 (본문) | MPPI가 쓰는 critic을 planner 자신의 rollout의 Monte Carlo return으로 fine-tuning | dynamics 적응·sim anchor·비관 없음 |
+| MBOP (2008.05556) | offline: 학습 모델 + 행동 복제 prior + 데이터 return으로 맞춘 가치 + MPPI | 구조가 같다. sim 사전학습과 물리 변화 없음 |
+| one-step RL (2106.08909, 초록) | 행동 정책의 Q + 한 번 개선 | model-free |
+| SimDist ablation (본문) | "Unfreezing the value function … causes catastrophic forgetting" | TD로 푼 것. 실제 return 평가는 안 해 봄 |
+
+- 판정: 이웃 설정에 발표. 기제(실현 return을 terminal로 + 데이터 밖 금지)는 LMPC가 원형이다. 찾지 못한 것은 sim 사전학습 world model 적응에서 낡은 sim 가치를 데이터를 모은 planner의 실제 가치로 바꾸고 sim 상태에 anchor를 두는 조합이다.
+- 확인 못 한 것: ROSMO(2210.05980), MuZero Unplugged, LS3(2107.04775), Bertsekas(2108.10315, 모델이 바뀌어도 offline terminal 비용을 유지한 재계획이 견고하다는 반대 방향 주장).
+- 심사자가 요구할 기준선: sim + 실데이터 replay의 TD 가치 fine-tuning(PIA/FOWM), 적응한 모델 안 상상으로 다시 학습(ReDRAW), 분해(dynamics만, 가치만, anchor·비관 없는 판).
