@@ -3,12 +3,14 @@
 Commands (run from ~/tdmpc2 on gpu1):
   GPU=N research/scripts/td.sh research/scripts/d05.py fit --cell cheetah-run__friction_0.15
   GPU=N research/scripts/td.sh research/scripts/d05.py f0 --cell cheetah-run__friction_0.15        (exit code 1 if F0 fails)
-  GPU=N research/scripts/td.sh research/scripts/d05.py eval --cell cheetah-run__friction_0.15 --arm VR|VRP [--eps 20] [--workers 40]
+  GPU=N research/scripts/td.sh research/scripts/d05.py calib --cell cheetah-run__friction_0.15      (after fit; a + b*Q0, design 05 §4a)
+  GPU=N research/scripts/td.sh research/scripts/d05.py eval --cell cheetah-run__friction_0.15 --arm VR|VRP|VC [--eps 20] [--workers 40]
   GPU=N research/scripts/td.sh research/scripts/d05.py summarize
 All commands take --out_root (default /mnt/newssd/cjkim/td/d05); smoke tests must pass another folder.
 fit: only the Q ensemble is trained, as a state value V(z) = Q(z, pi(z)), on the real returns of the data-collecting planner
 (discounted sum to the episode end + bootstrapped tail from the target ensemble mean). No max, no min, no imagination.
-eval: the design-04 oracle planner with the refit Q (VR), optionally minus a kNN-distance penalty (VRP).
+eval: the design-04 oracle planner with the refit Q (VR), optionally minus a kNN-distance penalty (VRP),
+or with the pretrained Q rescaled as a + b*Q0 (VC).
 The official TD-MPC2 code is imported, not modified.
 """
 import argparse
@@ -35,7 +37,8 @@ FIT_STEPS, TAU = 20_000, 0.02
 KNN, D0_PCT, BETA, PEN_CLIP = 5, 95, 1.0, 3.0
 F0_CELL, F0_TMAX, F0_CORR, F0_SLOPE = 'cheetah-run__friction_0.15', 400, 0.7, (0.5, 2.0)
 G1_CELL, G2_CELL = 'cheetah-run__friction_0.15', 'quadruped-run__motor_0.35'
-ARMS = ['VR', 'VRP']
+ARMS = ['VR', 'VRP', 'VC']
+PREFER = ['VC', 'VRP', 'VR']  # design 05 §4a: first passing arm in this order unless a later one is clearly higher
 
 
 # ----------------------------------------------------------------------------- value fit (design 05 §3)
@@ -145,6 +148,36 @@ def cmd_fit(a):
 	print(a.cell, 'after fit', dict(held_out=post, train=train, sigma_G=sigma, d0=d0, v_train_at=v_at, f0=f0), flush=True)
 
 
+def cmd_calib(a):
+	"""Design 05 §4a: least-squares (a, b) of the fit targets on the pretrained value, training episodes."""
+	task, _ = cell_parts(a.cell)
+	cfg, env, agent = make(task, compile_=False)
+	torch.manual_seed(FT_SEED)
+	m, gamma = agent.model, float(agent.discount)
+	d = np.load(f'{a.d01_root}/{a.cell}/data.npz')
+	obs, rew = d['obs'], d['rew']
+	E, T = rew.shape
+	ntr = N_TRAIN if E >= N_TRAIN + N_HELD else E - 1
+	tmax = min(F0_TMAX, T)
+	with torch.no_grad():
+		Z = m.encode(_cuda(obs.reshape(-1, obs.shape[-1])), None).reshape(E, T + 1, -1)
+		V0 = vmean_chunked(m, cfg, Z[:, :T].reshape(-1, Z.shape[-1])).reshape(E, T).cpu().numpy().astype(np.float64)  # pretrained
+		R = _cuda(rew)
+		S = torch.zeros(E, T, device='cuda')
+		acc = torch.zeros(E, device='cuda')
+		for t in range(T - 1, -1, -1):
+			acc = R[:, t] + gamma * acc
+			S[:, t] = acc
+		w = gamma ** (T - torch.arange(T, device='cuda', dtype=torch.float32))
+		agent.load(f'{a.out_root}/{a.cell}/VR.pt')                         # same targets as the fit: tail from the fitted value
+		G = (S + w.unsqueeze(0) * vmean_chunked(m, cfg, Z[:, T])).cpu().numpy().astype(np.float64)
+	b, a0 = np.polyfit(V0[:ntr].ravel(), G[:ntr].ravel(), 1)
+	res = dict(a=float(a0), b=float(b), ntr=ntr, train=fit_stats(a0 + b * V0[:ntr], G[:ntr]),
+			   held_out=fit_stats(a0 + b * V0[ntr:, :tmax], G[ntr:, :tmax]))
+	dump(f'{a.out_root}/{a.cell}/calib.json', res)
+	print(a.cell, 'calib', res, flush=True)
+
+
 def cmd_f0(a):
 	f = json.load(open(f'{a.out_root}/{a.cell}/fit.json'))
 	print(a.cell, 'F0', f['f0'], f['held_out'], flush=True)
@@ -156,9 +189,9 @@ def cmd_f0(a):
 class OracleV(Oracle):
 	"""Design-04 oracle planner; terminal value optionally minus the kNN-distance penalty."""
 
-	def __init__(self, agent, env, pool, workers, support=None):
+	def __init__(self, agent, env, pool, workers, support=None, calib=None):
 		super().__init__(agent, env, pool, workers)
-		self.sup = support
+		self.sup, self.calib = support, calib
 		self.dcur = []
 
 	def penalty(self, z):
@@ -179,6 +212,8 @@ class OracleV(Oracle):
 		v = self.m.Q(z, action, None, return_type='avg')
 		if self.sup is not None:
 			v = v - self.penalty(z)[0]
+		if self.calib is not None:
+			v = self.calib[0] + self.calib[1] * v
 		return G + self.gamma ** self.cfg.horizon * v
 
 	@torch.no_grad()
@@ -194,16 +229,22 @@ def cmd_eval(a):
 	pool = mp.get_context('fork').Pool(a.workers, initializer=_winit, initargs=(task, cond))  # before any CUDA use
 	cfg, env, agent = make(task, compile_=False)
 	folder = f'{a.out_root}/{a.cell}'
-	agent.load(f'{folder}/VR.pt')
-	sup = None
+	sup, calib = None, None
+	if a.arm == 'VC':                                                      # pretrained Q, rescaled
+		c = json.load(open(f'{folder}/calib.json'))
+		calib = (float(c['a']), float(c['b']))
+	else:
+		agent.load(f'{folder}/VR.pt')
 	if a.arm == 'VRP':
 		s = torch.load(f'{folder}/support.pt', weights_only=False)
 		sup = dict(Z=s['Z'].to('cuda'), d0=float(s['d0']), sigma=float(s['sigma']))
 	shifter, domain = Shifter(phys_of(env)), domain_of(task)
-	ora = OracleV(agent, env, pool, a.workers, sup)
+	ora = OracleV(agent, env, pool, a.workers, sup, calib)
 	t0 = time.time()
 	eps, recs = run_cond(ora, env, shifter, domain, cond, a.eps, seed=EVAL_SEED, record=True)
 	res = dict(cond=cond, summary=summary(eps), episodes=eps, plan_time=float(np.mean(ora.plan_time)), seconds=time.time() - t0)
+	if calib is not None:
+		res['calib'] = calib
 	rec = {k: np.stack([np.asarray(r[k]) for r in recs]) for k in ('obs', 'state', 'act', 'rew')}
 	rec['vsel'] = np.asarray(ora.vsel, np.float32).reshape(len(recs), -1)
 	if sup is not None:
@@ -237,16 +278,20 @@ def cmd_summarize(a):
 	cells = a.cells.split(',') if a.cells else H_CELLS
 	L, S = [], dict(cells={}, fit={})
 	L.append('# 설계 05 1단계 결과 요약 (자동 생성, `d05.py summarize`)\n')
-	L.append('모든 팔은 후보의 3스텝을 실제 simulator로 실행하는 planner다. ORA = 사전학습 가치(설계 04), ORA-VR = 실제 return에 맞춘 가치, ORA-VRP = 그 가치 − 데이터에서 먼 상태 벌점. PRE = 적응 없는 planner(설계 02). 평가 시드 2.\n')
+	L.append('모든 팔은 후보의 3스텝을 실제 simulator로 실행하는 planner다. ORA = 사전학습 가치(설계 04), ORA-VR = 실제 return에 맞춘 가치, ORA-VRP = 그 가치 − 데이터에서 먼 상태 벌점, ORA-VC = a + b × 사전학습 가치(눈금만 고침, §4a). PRE = 적응 없는 planner(설계 02). 평가 시드 2.\n')
 	L.append('## 가치 맞추기 (확인용 에피소드, t ≤ 400)\n')
-	L.append('| 셀 | 맞추기 전 상관 / 기울기 | 맞춘 뒤 상관 / 기울기 | 평균 V 전 → 뒤 (목표 평균) | 학습 상태 평균 V: 절반 / 3/4 / 끝 | σ_G | d₀ | F0 |')
-	L.append('|---|---|---|---|---|---|---|---|')
+	L.append('| 셀 | 맞추기 전 상관 / 기울기 | 맞춘 뒤 상관 / 기울기 | 평균 V 전 → 뒤 (목표 평균) | 학습 상태 평균 V: 절반 / 3/4 / 끝 | σ_G | d₀ | F0 | 눈금 고침 a, b (확인용 상관 / 기울기) |')
+	L.append('|---|---|---|---|---|---|---|---|---|')
 	for c in cells:
 		f = json.load(open(f'{a.out_root}/{c}/fit.json'))
 		S['fit'][c] = {k: f[k] for k in ('before', 'held_out', 'train', 'sigma_G', 'd0', 'v_train_at', 'f0', 'steps', 'ntr', 'held_out_d_over_d0', 'held_out_pen_frac')}
 		b, h = f['before']['held_out'], f['held_out']
 		va = ' / '.join(f'{v[0]:.1f}' if v else '–' for v in f['v_train_at'].values())
-		L.append(f'| {c} | {b["corr"]:.2f} / {b["slope"]:.2f} | {h["corr"]:.2f} / {h["slope"]:.2f} | {b["v_mean"]:.1f} → {h["v_mean"]:.1f} ({h["g_mean"]:.1f}) | {va} | {f["sigma_G"]:.1f} | {f["d0"]:.2f} | {("통과" if f["f0"] else "실패") if c == F0_CELL else "(보고만)"} |')
+		cs = '–'
+		if os.path.exists(f'{a.out_root}/{c}/calib.json'):
+			cj = S['fit'][c]['calib'] = json.load(open(f'{a.out_root}/{c}/calib.json'))
+			cs = f'{cj["a"]:.1f}, {cj["b"]:.2f} ({cj["held_out"]["corr"]:.2f} / {cj["held_out"]["slope"]:.2f})'
+		L.append(f'| {c} | {b["corr"]:.2f} / {b["slope"]:.2f} | {h["corr"]:.2f} / {h["slope"]:.2f} | {b["v_mean"]:.1f} → {h["v_mean"]:.1f} ({h["g_mean"]:.1f}) | {va} | {f["sigma_G"]:.1f} | {f["d0"]:.2f} | {("통과" if f["f0"] else "실패") if c == F0_CELL else "(보고만)"} | {cs} |')
 	f0 = S['fit'].get(F0_CELL, {}).get('f0')
 	ev, rec = {}, {}
 	for c in cells:
@@ -258,8 +303,8 @@ def cmd_summarize(a):
 				ev[c, arm] = json.load(open(f'{a.out_root}/{c}/eval_{arm}.json'))
 				rec[c, arm] = np.load(f'{a.out_root}/{c}/rec_{arm}.npz')
 	L.append('\n## 바뀐 조건 return (넘어짐 사건 / 넘어져 있는 시간 비율)\n')
-	L.append('| 셀 | PRE | ORA | ORA-VR | ORA-VRP |')
-	L.append('|---|---|---|---|---|')
+	L.append('| 셀 | PRE | ORA | ' + ' | '.join('ORA-' + arm for arm in ARMS) + ' |')
+	L.append('|---|---|---|' + '---|' * len(ARMS))
 	for c in cells:
 		row = []
 		for arm in ['PRE', 'ORA'] + ARMS:
@@ -285,11 +330,14 @@ def cmd_summarize(a):
 			same = float(np.abs(rec[c, arm]['obs'][:, 0] - rec[c, 'ORA']['obs'][:n, 0]).max())
 			e['init_obs_maxdiff'] = same
 			L.append(f'| {c} | ORA-{arm} | ' + ' | '.join(row) + f' | 최대 차이 {same:.1e} |')
-		if all((c, arm) in ev for arm in ARMS):
-			n = min(len(_ep(ev[c, arm], 'ret')) for arm in ARMS)
-			mdiff, ci = paired_ci(_ep(ev[c, 'VR'], 'ret')[:n], _ep(ev[c, 'VRP'], 'ret')[:n])
-			S['cells'][c]['VR_minus_VRP'] = dict(diff=mdiff, ci=ci)
-			L.append(f'| {c} | ORA-VR − ORA-VRP | {mdiff:+.0f} [{ci[0]:+.0f}, {ci[1]:+.0f}] | – | – |')
+		S['cells'][c]['between'] = {}
+		for i, x in enumerate(PREFER):
+			for y in PREFER[i + 1:]:
+				if (c, x) in ev and (c, y) in ev:
+					n = min(len(_ep(ev[c, x], 'ret')), len(_ep(ev[c, y], 'ret')))
+					mdiff, ci = paired_ci(_ep(ev[c, y], 'ret')[:n], _ep(ev[c, x], 'ret')[:n])
+					S['cells'][c]['between'][f'{y}-{x}'] = dict(diff=mdiff, ci=ci)
+					L.append(f'| {c} | ORA-{y} − ORA-{x} | {mdiff:+.0f} [{ci[0]:+.0f}, {ci[1]:+.0f}] | – | – |')
 	L.append('\n## 동작 (모든 에피소드 기록)\n')
 	L.append('| 셀 | 팔 | 속도 (m/s) | 2 m/s에 처음 닿는 스텝(중앙값, cheetah만) | 부드러움 / 노력 / 흔들림 | 계획 가치 − 실현 return | d/d₀ 평균 (벌점 > 0인 스텝 비율) | 계획 시간(초/스텝) |')
 	L.append('|---|---|---|---|---|---|---|---|')
@@ -326,14 +374,13 @@ def cmd_summarize(a):
 		gate, use = None, None
 		L.append('- 관문: 아직 판정할 수 없음 (결과 없는 팔이 있음)')
 	else:
-		ok = [arm for arm in ARMS if g1[arm] and g2[arm]]
+		ok = [arm for arm in PREFER if g1[arm] and g2[arm]]
 		gate = bool(ok)
-		use = None
-		if len(ok) == 2:
-			d = S['cells'][G1_CELL]['VR_minus_VRP']['ci']
-			use = 'VR' if d[0] > 0 else 'VRP'
-		elif ok:
-			use = ok[0]
+		use = ok[0] if ok else None
+		for y in ok[1:]:                                                  # a later arm replaces the current choice only if clearly higher in the G1 cell
+			lo = paired_ci(_ep(ev[G1_CELL, y], 'ret'), _ep(ev[G1_CELL, use], 'ret'))[1][0]
+			if lo > 0:
+				use = y
 		L.append(f'- 관문 통과: {yn(gate)}' + (f' → 쓸 팔: ORA-{use}의 가치' if use else ''))
 		if not gate:
 			L.append('- → G1을 만족하는 팔: ' + (', '.join(arm for arm in ARMS if g1[arm]) or '없음'))
@@ -350,6 +397,10 @@ def cmd_summarize(a):
 		'P6 quadruped 모터 ORA-VRP G2': g2['VRP'],
 		'P7 관문 통과': gate,
 		'P8 cheetah 마찰 ORA-VR이 2 m/s에 닿는 스텝 < ORA': None if fr('VR') is None else fr('VR') < fr('ORA'),
+		'P9 cheetah 마찰 ORA-VC − ORA > 0': None if c0('VC') is None else c0('VC') > 0,
+		'P10 quadruped 모터 ORA-VC G2': g2['VC'],
+		'P11 quadruped 모터 ORA-VR 넘어져 있는 시간 > ORA': None if (G2_CELL, 'VR') not in ev else
+			ev[G2_CELL, 'VR']['summary']['fallen_frac'] > ev[G2_CELL, 'ORA']['summary']['fallen_frac'],
 	}
 	for k, v in chk.items():
 		L.append(f'- {k}: {yn(v)}')
@@ -363,13 +414,14 @@ def cmd_summarize(a):
 if __name__ == '__main__':
 	ap = argparse.ArgumentParser()
 	sub = ap.add_subparsers(dest='cmd', required=True)
-	for name in ('fit', 'f0', 'eval', 'summarize'):
+	for name in ('fit', 'calib', 'f0', 'eval', 'summarize'):
 		p = sub.add_parser(name)
 		p.add_argument('--out_root', default=OUT)
 		if name != 'summarize':
 			p.add_argument('--cell', required=True)
 		if name == 'fit':
 			p.add_argument('--steps', type=int, default=None)
+		if name in ('fit', 'calib'):
 			p.add_argument('--d01_root', default=D01)
 		if name == 'eval':
 			p.add_argument('--arm', choices=ARMS, required=True)
@@ -380,4 +432,4 @@ if __name__ == '__main__':
 			p.add_argument('--d02_root', default=D02)
 			p.add_argument('--d04_root', default=D04)
 	a = ap.parse_args()
-	dict(fit=cmd_fit, f0=cmd_f0, eval=cmd_eval, summarize=cmd_summarize)[a.cmd](a)
+	dict(fit=cmd_fit, calib=cmd_calib, f0=cmd_f0, eval=cmd_eval, summarize=cmd_summarize)[a.cmd](a)
