@@ -184,7 +184,7 @@ def cmd_summarize(a):
 	L.append('|---|---|---|---|---|')
 	v0 = {}
 	for task in sorted({cell_parts(c)[0] for c in cells}):
-		cell0 = [c for c in CELLS + cells if cell_parts(c)[0] == task][0]
+		cell0 = [c for c in cells + CELLS if cell_parts(c)[0] == task][0]
 		pre = json.load(open(f'{d02_root}/{cell0}/eval_PRE.json'))['nominal']['summary']['ret']
 		f = f'{out_root}/nominal/{task}/eval_ORA.json'
 		if not os.path.exists(f):
