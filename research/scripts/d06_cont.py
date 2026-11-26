@@ -26,7 +26,7 @@ How the result will be read (written before running)
   5. J_o - (V + gamma^n Q_end) by posture / phase: how far the pretrained Q is from realised return.
 Limit: V follows the un-adapted planner after the plan, so it is the value of one deviation, not of a policy.
 
-Addendum (2026-11-27, 등록 안 함; survey section 9): states visited by the exact-only planner itself
+Addendum (2026-11-26, 등록 안 함; survey section 9): states visited by the exact-only planner itself
   Why: section 8.5 found that at states visited by learned consensus one exact-only plan is BETTER than an un-adapted plan
   (+1.42), while the exact-only planner in closed loop is 177 below the un-adapted planner. The performance difference
   lemma says the closed-loop difference J(E) - J(S) equals the sum of decision-level advantages measured at the states
