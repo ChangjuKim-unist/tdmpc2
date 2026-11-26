@@ -26,6 +26,28 @@ How the result will be read (written before running)
   5. J_o - (V + gamma^n Q_end) by posture / phase: how far the pretrained Q is from realised return.
 Limit: V follows the un-adapted planner after the plan, so it is the value of one deviation, not of a policy.
 
+Addendum (2026-11-27, 등록 안 함; survey section 9): states visited by the exact-only planner itself
+  Why: section 8.5 found that at states visited by learned consensus one exact-only plan is BETTER than an un-adapted plan
+  (+1.42), while the exact-only planner in closed loop is 177 below the un-adapted planner. The performance difference
+  lemma says the closed-loop difference J(E) - J(S) equals the sum of decision-level advantages measured at the states
+  that E visits, followed by S. Section 8 sampled the wrong states for this pair.
+  What: cheetah friction, --src ORA (design 04 exact-only records), 96 states with t < 150 (start-up) and 64 with t >= 150,
+  warm start from the exact-only planner, same four planners, same rollout. Two continuations: the un-adapted planner
+  (--cont planner, the one the lemma is exact for) and the deterministic policy prior mean (--cont pi, no sampling noise,
+  but its reference policy is the prior, so the lemma is only approximate there).
+  How it will be read (written before running)
+  A1. Start-up states (t < 150), planner continuation: V(E) - V(S) with CI below 0 -> the start-up delay hypothesis is
+      confirmed: the closed-loop loss of exact-only comes from decisions at its own start-up states. CI covering 0 or
+      above 0 -> not confirmed.
+  A2. Lemma total: (500 / 3) x weighted mean of the undiscounted window-reward difference E - S over all sampled states,
+      with CI, against the closed-loop -177. The 150-step window and t <= 343 sampling truncate late effects (bias to 0).
+      CI containing -177 or below -> decision-level account is consistent in size.
+  A3. Policy-prior continuation is secondary. Same sign as A1 with CI excluding 0 -> supports A1. Opposite sign ->
+      planner continuation governs, and the disagreement is reported.
+  A4. V(O) - V(E) at start-up states with CI above 0 -> at the states where exact-only loses, agreement with the sim
+      model corrects it at decision level (572 vs 276).
+  Prediction: A1 negative with CI below 0 (0.65); A2 CI contains -177 (0.5); A4 above 0 (0.6).
+
   GPU=N research/scripts/td.sh research/scripts/d06_cont.py plans --cell quadruped-run__motor_0.35
   GPU=N research/scripts/td.sh research/scripts/d06_cont.py roll --cell quadruped-run__motor_0.35 --shard 0 --shards 16
   GPU=N research/scripts/td.sh research/scripts/d06_cont.py report --cell quadruped-run__motor_0.35 --shards 16
@@ -46,6 +68,7 @@ from d06 import consensus, plan_value
 from d06_attr import BINS, UP, mppi, spearman
 
 D06 = '/mnt/newssd/cjkim/td/d06'
+D04 = '/mnt/newssd/cjkim/td/d04'
 PL = ('S', 'L', 'O', 'E')
 GAMMA = 0.99
 
@@ -59,8 +82,12 @@ def cmd_plans(a):
 	agent.load(model_path(a.cell, 'MIX'))
 	dynx = copy.deepcopy(agent.model._dynamics).eval()
 	m = agent.model
-	rec = np.load(f'{a.out_root}/{a.cell}/rec_CONMIX.npz')
-	obs, st = rec['shift_obs'], rec['shift_state']
+	if a.src == 'ORA':                                                   # states visited by the exact-only planner (design 04)
+		rec = np.load(f'{D04}/{a.cell}/rec_ORA.npz')
+		obs, st = rec['obs'], rec['state']
+	else:
+		rec = np.load(f'{a.out_root}/{a.cell}/rec_CONMIX.npz')
+		obs, st = rec['shift_obs'], rec['shift_state']
 	E, T = obs.shape[0], obs.shape[1] - 1
 	rs = np.random.RandomState(a.seed)
 	ee, tt = np.meshgrid(np.arange(E), np.arange(2, T - a.hc - 5), indexing='ij')
@@ -69,7 +96,7 @@ def cmd_plans(a):
 		key = obs[ee, tt, UP]
 		strata = [(key < 0, 0.4), ((key >= 0) & (key < 0.8), 0.4), (key >= 0.8, 0.2)]
 	else:                                                                # start-up phase and the rest
-		strata = [(tt < 100, 0.4), (tt >= 100, 0.6)]
+		strata = [(tt < a.t_split, a.share0), (tt >= a.t_split, 1 - a.share0)]
 	pick, binid, wt = [], [], []
 	for b, (mask, share) in enumerate(strata):
 		idx = np.where(mask)[0]
@@ -92,7 +119,10 @@ def cmd_plans(a):
 		mean0 = torch.zeros(H, A, device='cuda')
 		for tau in (t - 2, t - 1):                                         # warm start as in deployment
 			zz = z_of(tau)
-			r = mppi(agent, zz, mean0, con_x(zz.repeat(S, 1)), dynx)
+			if a.src == 'ORA':                                             # the deployed planner was exact-only
+				r = mppi(agent, zz, mean0, lambda act: (ora.values(st[e, tau], act).nan_to_num(0), None), dyn0)
+			else:
+				r = mppi(agent, zz, mean0, con_x(zz.repeat(S, 1)), dynx)
 			mean0 = torch.zeros(H, A, device='cuda')
 			mean0[:-1] = r['mean'][1:]
 		z, state = z_of(t), st[e, t]
@@ -117,7 +147,7 @@ def cmd_plans(a):
 			score[i, pi_, :, 2] = jo.squeeze(1).cpu().numpy()
 		if i % 10 == 0:
 			print(f'{a.cell} plans {i}/{N} {time.time() - t0:.0f}s', flush=True)
-	np.savez_compressed(f'{a.out_root}/{a.cell}/cont_plans.npz', plans=plans, score=score, state=st[ee[pick], tt[pick]],
+	np.savez_compressed(f'{a.out_root}/{a.cell}/cont{a.tag}_plans.npz', plans=plans, score=score, state=st[ee[pick], tt[pick]],
 						obs=obs[ee[pick], tt[pick]], ep=ee[pick], t=tt[pick], bin=binid, wt=wt)
 	pool.close()
 	print(a.cell, 'plans done', N, flush=True)
@@ -125,8 +155,9 @@ def cmd_plans(a):
 
 def cmd_roll(a):
 	task, cond = cell_parts(a.cell)
-	d = np.load(f'{a.out_root}/{a.cell}/cont_plans.npz')
+	d = np.load(f'{a.out_root}/{a.cell}/cont{a.tag}_plans.npz')
 	plans, states = d['plans'], d['state']
+	ctag = '' if a.cont == 'planner' else '_' + a.cont
 	N, P, K, H, A = plans.shape
 	cfg, env, agent = make(task, compile_=False)
 	domain = domain_of(task)
@@ -166,7 +197,11 @@ def cmd_roll(a):
 						obs, rew[n, r, pi_, k, h] = step(plans[i, pi_, k, h])
 						f += int(bool(fallen(domain, p)))
 					for c in range(a.hc):
-						act = agent.act(obs, t0=c == 0, eval_mode=True)
+						if a.cont == 'pi':                                         # deterministic policy prior mean
+							with torch.no_grad():
+								act = m.pi(m.encode(obs.to('cuda').unsqueeze(0), None), None)[1]['mean'][0].cpu()
+						else:
+							act = agent.act(obs, t0=c == 0, eval_mode=True)
 						obs, rew[n, r, pi_, k, H + c] = step(act.numpy())
 						f += int(bool(fallen(domain, p)))
 					fal[n, r, pi_, k] = f / L
@@ -174,7 +209,7 @@ def cmd_roll(a):
 						z = m.encode(obs.to('cuda').unsqueeze(0), None)
 						qend[n, r, pi_, k] = float(m.Q(z, m.pi(z, None)[0], None, return_type='avg'))
 		print(f'{a.cell} shard {a.shard} {n + 1}/{len(mine)} {time.time() - t0:.0f}s', flush=True)
-	np.savez_compressed(f'{a.out_root}/{a.cell}/cont_roll_{a.shard:02d}.npz', idx=np.array(mine), rew=rew, fal=fal, qend=qend)
+	np.savez_compressed(f'{a.out_root}/{a.cell}/cont{a.tag}_roll{ctag}_{a.shard:02d}.npz', idx=np.array(mine), rew=rew, fal=fal, qend=qend)
 	print(a.cell, 'shard', a.shard, 'done', flush=True)
 
 
@@ -190,10 +225,11 @@ def boot(x, w, n=4000, seed=0):
 
 
 def cmd_report(a):
-	d = np.load(f'{a.out_root}/{a.cell}/cont_plans.npz')
+	d = np.load(f'{a.out_root}/{a.cell}/cont{a.tag}_plans.npz')
 	score, binid, wt = d['score'], d['bin'], d['wt']
+	ctag = '' if a.cont == 'planner' else '_' + a.cont
 	N, P, K = score.shape[:3]
-	files = sorted(glob.glob(f'{a.out_root}/{a.cell}/cont_roll_*.npz'))
+	files = sorted(glob.glob(f'{a.out_root}/{a.cell}/cont{a.tag}_roll{ctag}_[0-9]*.npz'))
 	rew = fal = qend = None
 	for f in files:
 		s = np.load(f)
@@ -211,11 +247,15 @@ def cmd_report(a):
 	Vm, Um, Fm = V.mean((1, 3)), U.mean((1, 3)), fal.mean((1, 3))          # N x P
 	J = score.mean(2)                                                      # N x P x 3 (J_s, J_x, J_o)
 	quad = a.cell.startswith('quadruped')
-	names = ('fallen', 'tilted', 'upright') if quad else ('t<100', 't>=100')
+	ix = {n: i for i, n in enumerate(PL)}
+	names = ('fallen', 'tilted', 'upright') if quad else (f't<{a.t_split}', f't>={a.t_split}')
 	groups = [('all', np.ones(N, bool))] + [(nm, binid == b) for b, nm in enumerate(names)]
 	if quad:
 		groups.insert(1, ('fallen+tilted', binid < 2))
-	ix = {n: i for i, n in enumerate(PL)}
+	print(f'\n== source {a.src}, continuation {a.cont}')
+	for u in ('L', 'O', 'E'):                                              # performance difference lemma total (3-action plans)
+		e = boot(Um[:, ix[u]] - Um[:, ix['S']], wt)
+		print(f'   lemma total {u}-S: {500 / 3 * e[0]:+.0f} [{500 / 3 * e[1]:+.0f}, {500 / 3 * e[2]:+.0f}] (exact only when the states are those visited by {u})')
 	print(f'\n== {a.cell}: {N} states, {rew.shape[1]} repeats, {K} elites per planner, window {L} steps')
 	for gname, g in groups:
 		if not g.any():
@@ -233,7 +273,7 @@ def cmd_report(a):
 		Vp = V.mean(1).reshape(N, P * K)                                   # plans of a state, mean over repeats
 		sc = score.reshape(N, P * K, 3)
 		rho = np.array([[spearman(torch.as_tensor(sc[i, :, c]), torch.as_tensor(Vp[i])) for c in range(3)] for i in np.where(g)[0]])
-		rel = np.array([spearman(torch.as_tensor(V[i, 0].reshape(-1)), torch.as_tensor(V[i, 1].reshape(-1))) for i in np.where(g)[0]]) if V.shape[1] > 1 else np.zeros(1)
+		rel = np.array([spearman(torch.as_tensor(V[i, 0].reshape(-1)), torch.as_tensor(V[i, 1].reshape(-1))) for i in np.where(g)[0]]) if V.shape[1] > 1 else np.zeros(int(g.sum()))
 		ww = wt[g] / wt[g].sum()
 		print(f'   rank corr with realised V over the {P * K} plans of a state: sim {(rho[:, 0] * ww).sum():.2f}  MIX {(rho[:, 1] * ww).sum():.2f}  exact-3-step {(rho[:, 2] * ww).sum():.2f}'
 			  f'  | repeat-to-repeat {(rel * ww).sum():.2f}')
@@ -254,5 +294,10 @@ if __name__ == '__main__':
 	ap.add_argument('--workers', type=int, default=40)
 	ap.add_argument('--seed', type=int, default=11)
 	ap.add_argument('--out_root', default=D06)
+	ap.add_argument('--src', choices=['CONMIX', 'ORA'], default='CONMIX')   # whose visited states
+	ap.add_argument('--tag', default='')                                   # file name suffix, e.g. _ora
+	ap.add_argument('--cont', choices=['planner', 'pi'], default='planner')
+	ap.add_argument('--t_split', type=int, default=100)
+	ap.add_argument('--share0', type=float, default=0.4)
 	a = ap.parse_args()
 	dict(plans=cmd_plans, roll=cmd_roll, report=cmd_report)[a.cmd](a)
