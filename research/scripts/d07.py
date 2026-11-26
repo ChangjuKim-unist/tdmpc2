@@ -119,7 +119,7 @@ def cmd_run(a):
 	res['round1'] = dict(summary=summary(eps1), episodes=eps1)
 	np.savez_compressed(f'{folder}/data1.npz', **d1)
 	m1, log1 = finetune_mix(cfg, d1, sim, s, a.ft_steps)
-	m1.save(f'{folder}/M1.pt')
+	torch.save(m1.model._dynamics.state_dict(), f'{folder}/M1_dyn.pt')          # only the dynamics network changes
 	res['M1'] = log1[-1] if log1 else None
 	print(a.cell, s, 'round1', round(res['round1']['summary']['ret'], 1), 'M1', res['M1'], flush=True)
 
@@ -140,7 +140,7 @@ def cmd_run(a):
 		np.savez_compressed(f'{folder}/data2_{arm}.npz', **d2)
 		data = {k: np.concatenate([d1[k], d2[k]], 0) for k in ('obs', 'act', 'rew')}
 		m2, log2 = finetune_mix(cfg, data, sim, s, a.ft_steps)
-		m2.save(f'{folder}/M2_{arm}.pt')
+		torch.save(m2.model._dynamics.state_dict(), f'{folder}/M2_{arm}_dyn.pt')
 		con = con_of(m2, dyn0)
 		ev = evaluate(con, arm)
 		res[arm] = dict(round2=dict(summary=summary(eps2), episodes=eps2), M2=log2[-1] if log2 else None, eval=ev,
