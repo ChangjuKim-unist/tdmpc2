@@ -98,3 +98,7 @@
 등록 전에 cheetah 마찰 seed 1로 통로만 확인했다(다른 폴더, 평가 1 에피소드, 셋째 라운드 1 에피소드, 정확한 dynamics 합의 1 에피소드). 이때 k=5를 다시 맞춘 모델이 설계 07에 저장된 모델과 가중치가 완전히 같음을 확인했다(최대 차이 0.0). 작은 시험에서 본 return(에피소드 1개씩)은 증거로 쓰지 않는다.
 
 ## 10. 실행 기록
+
+- **본 실행 (2026-11-27 00:13 시작, gpu1):** cheetah 마찰 seed 1–32, 이어서 quadruped 모터 seed 1–16. 48개 작업을 GPU 4개에 4개씩 돌린다. 원본은 `/mnt/newssd/cjkim/td/d08/{조건}/sNN/`에 쓴다.
+- **정확한 dynamics 합의:** CPU worker 28개로 cheetah 마찰, quadruped 모터 순서로 돈다. 원본은 `/mnt/newssd/cjkim/td/d08/oracle/{조건}/`에 쓴다.
+- **gpu1 저장소:** 설계 07의 요약 파일이 컨테이너(root) 소유로 남아 pull을 막았다. 그 폴더를 `research/results/d07_gpu1_generated`로 이름만 바꿨다(내용은 commit한 것과 같다). 이후 요약은 `/mnt/newssd/cjkim/td/d08/res/`에 쓰고 로컬로 복사한다.
