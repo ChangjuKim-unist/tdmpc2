@@ -5,7 +5,7 @@
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 DATA=${DATA:-/data1/cjkim/newssd}
 MEM=${MEM:-120g}
-ARGS=(--rm --init --gpus "\"device=${GPU:-0}\"" --network=host --ipc=host --memory "$MEM" --memory-swap "$MEM"
+ARGS=(--rm --init --gpus "\"device=${GPU:-0}\"" --network=host --ipc=host --security-opt seccomp=$HOME/simdist-docker/seccomp-clone3.json --memory "$MEM" --memory-swap "$MEM"
       -e PYTHONUNBUFFERED=1 -e MUJOCO_GL=${MUJOCO_GL:-disable}
       -e PYTHONPATH=/mnt/newssd/cjkim/td_pylibs:/workspace/simdist/tdmpc2 -e TD_DEPS=/mnt/newssd/cjkim/td_pylibs_deps
       -v "$REPO:/workspace/simdist:rw" -v "$DATA:/mnt/newssd/cjkim:rw" -w /workspace/simdist)
