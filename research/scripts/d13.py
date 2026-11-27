@@ -3,6 +3,9 @@
 Based on d07_ceiling.py (design 07 §9). Arms:
   RAW    the procedure of design 07 §9 unchanged
   MIX    every update batch is half real (online buffer) and half nominal sim data (design 02's sim episodes, with rewards)
+  SCALE  RAW, but before the first update the running Q scale of the policy loss (common/scale.py; not stored in the checkpoint, so it
+         restarts at 1) is set to the pretrained agent's own value: the 5-95 percentile range of Q(z, pi(z)) over 10 batches of the
+         seed buffer (registered amendment, design 13 section 3a)
 Checkpoints are saved every --ckpt_freq steps up to --ckpt_until (for the later gates).
 
 Original header of d07_ceiling.py:
@@ -77,6 +80,21 @@ def to_td(env, obs, action=None, reward=None):
 					  terminated=terminated.unsqueeze(0), batch_size=(1,))
 
 
+@torch.no_grad()
+def init_scale(agent, buffer, n=10):
+	"""Set agent.scale (the running Q scale of the policy loss) to the pretrained Q range, as update_pi would measure it, before any update."""
+	vals = []
+	for _ in range(n):
+		obs = buffer.sample()[0]                                            # (horizon + 1, batch, obs)
+		z = agent.model.encode(obs, None)
+		action, _ = agent.model.pi(z, None)
+		qs = agent.model.Q(z, action, None, return_type='avg', detach=True)
+		p = agent.scale._percentile(qs[0])
+		vals.append(float(torch.clamp(p[1] - p[0], min=1.0)))
+	agent.scale.value.fill_(float(np.mean(vals)))
+	return dict(value=float(np.mean(vals)), batches=vals)
+
+
 def cmd_run(a):
 	task, cond = cell_parts(a.cell)
 	folder = f'{a.out_root}/{a.cell}/{a.arm}_s{a.seed}'
@@ -123,6 +141,9 @@ def cmd_run(a):
 			obs, reward, done, info = env.step(action)
 			tds.append(to_td(env, obs, action, reward))
 			R += float(reward)
+			if a.arm == 'SCALE' and not log.get('scale_init') and step >= a.seed_steps and buffer.num_eps > 0:
+				log['scale_init'] = init_scale(agent, buffer)
+				print(a.cell, 'Q scale initialised to', log['scale_init'], flush=True)
 			if step >= a.seed_steps and buffer.num_eps > 0:
 				last = agent.update(buffer)
 			step += 1
@@ -149,7 +170,7 @@ def cmd_summarize(a):
 		L.append('| 팔 | seed | 학습 전 | 가장 낮은 평가 (스텝) | 꺼짐 깊이 | 꺼졌나 | 그때 넘어져 있는 시간 | 학습 에피소드 10개 평균의 최저 | 마지막 세 평가의 평균 | dynamics만 고친 기준 |')
 		L.append('|---|---|---|---|---|---|---|---|---|---|')
 		S[cell] = {}
-		for arm in ('RAW', 'MIX'):
+		for arm in ('RAW', 'MIX', 'SCALE'):
 			rows = []
 			for f in sorted(glob.glob(f'{a.out_root}/{cell}/{arm}_s*/log.json')):
 				g = json.load(open(f))
@@ -169,7 +190,7 @@ def cmd_summarize(a):
 				L.append(f'| {arm} | {r["seed"]} | {r["start"]:.0f} | {r["low"]:.0f} ({r["low_step"]:,}) | {depth:.2f} | {"예" if r["dipped"] else "아니오"} | {r["fallen"]:.2f} | {roll:.0f} | '
 						 f'{r["final"]:.0f}{"" if r["done"] else f" (진행 중, {r_last(r)})"} | {DYN_REF[cell]:.0f} |')
 			S[cell][arm] = dict(runs=rows, dipped=int(sum(r['dipped'] for r in rows)), n=len(rows))
-		for arm in ('RAW', 'MIX'):
+		for arm in ('RAW', 'MIX', 'SCALE'):
 			d = S[cell][arm]
 			L.append(f'\n- {arm}: 꺼진 실행 {d["dipped"]} / {d["n"]}')
 	os.makedirs(a.res_dir, exist_ok=True)
@@ -187,7 +208,7 @@ if __name__ == '__main__':
 	sub = ap.add_subparsers(dest='cmd', required=True)
 	p = sub.add_parser('run')
 	p.add_argument('--cell', required=True)
-	p.add_argument('--arm', choices=['RAW', 'MIX'], required=True)
+	p.add_argument('--arm', choices=['RAW', 'MIX', 'SCALE'], required=True)
 	p.add_argument('--steps', type=int, default=100_000)
 	p.add_argument('--seed_steps', type=int, default=5_000)
 	p.add_argument('--eval_freq', type=int, default=10_000)
