@@ -60,6 +60,10 @@ def ref_return(agent0, ep, gamma):
 	return G
 
 
+def snap_sd(agent):
+	return {k: (v.detach().cpu().clone() if torch.is_tensor(v) else copy.deepcopy(v)) for k, v in agent.model.state_dict().items()}
+
+
 def cmd_run(a):
 	from d07 import fresh
 	task, cond = cell_parts(a.cell)
@@ -76,7 +80,7 @@ def cmd_run(a):
 	reseed_env(env, 6000 + a.seed)
 	gamma = float(agent.discount)
 	snaps, episodes, step, n_upd, t0 = [], [], 0, 0, time.time()
-	snaps.append(dict(updates=0, sd={k: v.detach().cpu().clone() for k, v in agent.model.state_dict().items()}, scale=float(agent.scale.value)))
+	snaps.append(dict(updates=0, sd=snap_sd(agent), scale=float(agent.scale.value)))
 	while step < cfg.steps:
 		obs, done = env.reset(), False
 		tds, O, A, R = [to_td(env, obs)], [obs.numpy()], [], []
@@ -89,7 +93,7 @@ def cmd_run(a):
 				agent.update(buffer)
 				n_upd += 1
 				if n_upd % a.snap_every == 0 and n_upd <= a.steps:
-					snaps.append(dict(updates=n_upd, sd={k: v.detach().cpu().clone() for k, v in agent.model.state_dict().items()}, scale=float(agent.scale.value)))
+					snaps.append(dict(updates=n_upd, sd=snap_sd(agent), scale=float(agent.scale.value)))
 			step += 1
 		buffer.add(torch.cat(tds))
 		episodes.append(dict(obs=np.asarray(O, np.float32), act=np.asarray(A, np.float32), rew=np.asarray(R, np.float32), updates_end=n_upd, ret=float(sum(R))))
