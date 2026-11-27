@@ -46,7 +46,7 @@ class MixBuffer:
 	"""sample() returns half a batch from the online (real) buffer and half from the nominal sim buffer."""
 
 	def __init__(self, real, sim):
-		self.real, self.sim = real, sim
+		self.real, self.sim, self.calls = real, sim, 0
 
 	@property
 	def num_eps(self):
@@ -57,6 +57,10 @@ class MixBuffer:
 
 	def sample(self):
 		a, b = self.real.sample(), self.sim.sample()
+		if self.calls < 200:                                                # guard: both halves must be free of NaN
+			self.calls += 1
+			for name, t in (('real', a), ('sim', b)):
+				assert not any(torch.isnan(x).any() for x in t[:4] if x is not None), f'NaN in the {name} half of the batch'
 		return tuple(None if x is None else torch.cat([x, y], 1) for x, y in zip(a[:4], b[:4])) + (None,)
 
 
@@ -86,7 +90,9 @@ def cmd_run(a):
 		from d02 import N_SIM, load_sim, make_buffer
 		half = copy.copy(cfg)
 		half.batch_size = cfg.batch_size // 2
-		sim = make_buffer(copy.copy(half), load_sim(task), N_SIM)          # make_buffer sets buffer_size on the copy it is given
+		simcfg = copy.copy(half)
+		simcfg.steps = 10 ** 6                                              # Buffer capacity is min(buffer_size, steps); keep all sim steps even in short smoke runs
+		sim = make_buffer(simcfg, load_sim(task), N_SIM)                    # make_buffer sets buffer_size (20,000) on the copy it is given
 		buffer = MixBuffer(Buffer(half), sim)
 	else:
 		buffer = Buffer(cfg)
