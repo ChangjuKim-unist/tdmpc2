@@ -6,7 +6,7 @@
 
 적은 실제 데이터로 world model을 적응하면 평균 예측 오차는 준다. 그런데 planner가 남은 오차를 파고들고, 그 오차가 horizon을 따라 쌓인다. 그래서 적응이 이득 대신 실패(넘어짐)를 만든다. 이를 막는 적응 방법을 만든다(이득 + 안전 + 보존).
 
-- 순서: DMControl에서 방법을 확인한 뒤, 잘되면 Go1(실기)로 옮긴다.
+- 순서: DMControl에서 방법을 확인한 뒤, 잘되면 Go1(실기)로 옮긴다. 2026-11-27 사용자 결정으로 Go1 시뮬레이션은 지금부터 병행한다(코드는 `~/simdist`, 실행은 gpu4의 `/data1/cjkim/simdist_d14`, 설계 문서와 기록은 이 저장소).
 - 목표 학회: RSS 2027. extended abstract 마감 2026-12-04, 최종본 2027-04-16.
 - 이전 연구 저장소: `~/simdist` (fork `ChangjuKim-unist/simdist`, branch go1-support). 결과는 필요할 때만 꺼내 쓴다. 요약은 `research/docs/background_ko.md`.
 
