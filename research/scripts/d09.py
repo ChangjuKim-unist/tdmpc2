@@ -143,6 +143,16 @@ def cmd_run(a):
 		for i in range(a.timing):
 			actor.act(obs, t0=i == 0, eval_mode=True)
 		print(a.cell, pname(a), f'k{a.ckpt} h{a.horizon}', f'{(time.time() - tic) / a.timing:.3f} s/plan', flush=True)
+		if a.planner == 'ORAPEN':                                           # code check: the same candidates scored by ORA and by ORAPEN
+			ref = Oracle(agent, env, pool, a.workers)
+			state = phys_of(env).get_state().copy()
+			acts = torch.rand(cfg.horizon, cfg.num_samples, cfg.action_dim, device='cuda') * 2 - 1
+			actor.z0 = agent.model.encode(obs.to('cuda').unsqueeze(0), None)
+			torch.manual_seed(0)
+			v0 = ref.values(state, acts)
+			torch.manual_seed(0)
+			v1 = actor.values(state, acts)
+			print(f'check: ORA − ORAPEN (lam {a.lam:g}) over {len(v0)} candidates: mean {float((v0 - v1).mean()):.5f}, max abs {float((v0 - v1).abs().max()):.5f}, ORA value sd {float(v0.std()):.3f}', flush=True)
 		return
 	base = 5000 if a.proto == 'collect' else 3000
 	for s in range(a.seed_from, a.seed_to + 1):
