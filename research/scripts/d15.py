@@ -3,7 +3,7 @@
 Same start as design 13's RAW arm (design 07 section 9): the pretrained planner collects --seed_steps steps under the shifted physics
 with exploration noise and no update, then official online training (all components, one update per env step) continues.
 Snapshots of the model are kept every --snap_every updates up to --steps updates. Afterwards every snapshot scores a FIXED set of states
-(the seed episodes, steps 0..--t_max-1):
+(the seed episodes, steps --t_min..--t_max-1):
   Q(z_t, a_t)       the executed action        (mean over the 5 Q members, two-hot inverted)
   Q(z_t, pi(z_t))   the policy's mean action   (what the planner's terminal value and the policy loss use)
 against a fixed reference return G_t = sum_{k=t}^{T-1} gamma^(k-t) r_k + gamma^(T-t) Q_pre(z_T, pi_pre(z_T)) (pretrained bootstrap, the same
@@ -32,7 +32,7 @@ from d13 import to_td
 OUT = '/mnt/newssd/cjkim/td/d15'
 CELLS = ['quadruped-run__motor_0.35', 'walker-run__friction_0.15']
 SHORT = {'quadruped-run__motor_0.35': 'quadruped 모터', 'walker-run__friction_0.15': 'walker 마찰'}
-WINDOW, DOM = 1500, 3.0
+WINDOW, DOM, WIDEN = 1500, 3.0, 1.5
 
 
 @torch.no_grad()
@@ -102,10 +102,10 @@ def cmd_run(a):
 	n_seed = a.seed_steps // 500
 	agent0 = fresh(cfg)
 	seed_eps = episodes[:n_seed]
-	Gs = [ref_return(agent0, ep, gamma)[:a.t_max] for ep in seed_eps]
+	Gs = [ref_return(agent0, ep, gamma)[a.t_min:a.t_max] for ep in seed_eps]
 	G = torch.cat(Gs)
-	obs_f = torch.as_tensor(np.concatenate([ep['obs'][:a.t_max] for ep in seed_eps]), dtype=torch.float32, device='cuda')
-	act_f = torch.as_tensor(np.concatenate([ep['act'][:a.t_max] for ep in seed_eps]), dtype=torch.float32, device='cuda')
+	obs_f = torch.as_tensor(np.concatenate([ep['obs'][a.t_min:a.t_max] for ep in seed_eps]), dtype=torch.float32, device='cuda')
+	act_f = torch.as_tensor(np.concatenate([ep['act'][a.t_min:a.t_max] for ep in seed_eps]), dtype=torch.float32, device='cuda')
 	probe = fresh(cfg)
 	rows = []
 	pct = lambda x: [float(v) for v in torch.quantile(x, torch.tensor([0.05, 0.5, 0.95], device=x.device))]
@@ -119,8 +119,8 @@ def cmd_run(a):
 	for ep in episodes[n_seed:]:
 		sn = min(snaps, key=lambda s: abs(s['updates'] - ep['updates_end']))
 		probe.model.load_state_dict(sn['sd'])
-		Ge = ref_return(agent0, ep, gamma)[:a.t_max]
-		q_a, _ = q_on(probe, torch.as_tensor(ep['obs'][:a.t_max], device='cuda'), torch.as_tensor(ep['act'][:a.t_max], device='cuda'))
+		Ge = ref_return(agent0, ep, gamma)[a.t_min:a.t_max]
+		q_a, _ = q_on(probe, torch.as_tensor(ep['obs'][a.t_min:a.t_max], device='cuda'), torch.as_tensor(ep['act'][a.t_min:a.t_max], device='cuda'))
 		online.append(dict(updates_end=ep['updates_end'], snap=sn['updates'], ret=ep['ret'], bias=float((q_a - Ge).mean()), q=pct(q_a), G=pct(Ge)))
 	dump(f'{folder}/done.json', dict(cell=a.cell, seed=a.seed, args=vars(a), gamma=gamma, seed_returns=[ep['ret'] for ep in seed_eps], snapshots=rows, online=online,
 									 seconds=time.time() - t0))
@@ -130,42 +130,43 @@ def cmd_run(a):
 # ----------------------------------------------------------------------------- summary (registered analysis, design 15 section 4)
 
 def direction(r0, rk, key):
-	"""Change of the 5th and 95th percentiles of Q relative to the pre-update snapshot."""
+	"""Did the 5-95 width grow by WIDEN, and if so, which tail moved (relative to the pre-update snapshot)?"""
 	d_lo, d_hi = rk[key][0] - r0[key][0], rk[key][2] - r0[key][2]
-	if d_hi > 0 and d_hi >= DOM * max(-d_lo, 0) and d_lo > -abs(d_hi) / DOM:
+	w = (rk[key][2] - rk[key][0]) / max(r0[key][2] - r0[key][0], 1e-6)
+	if w < WIDEN:
+		v = '벌어지지 않음'
+	elif d_hi > 0 and d_hi >= DOM * max(-d_lo, 0):
 		v = '위로'
-	elif d_lo < 0 and -d_lo >= DOM * max(d_hi, 0) and d_hi < abs(d_lo) / DOM:
+	elif d_lo < 0 and -d_lo >= DOM * max(d_hi, 0):
 		v = '아래로'
-	elif d_hi > 0 and d_lo < 0:
-		v = '양쪽으로'
 	else:
-		v = '좁아짐'
-	return v, d_lo, d_hi
+		v = '양쪽으로'
+	return v, d_lo, d_hi, w
 
 
 def cmd_summarize(a):
 	L, S = ['# 설계 15 결과 요약 (자동 생성, `d15.py summarize`)\n'], {}
-	L.append(f'고정한 상태 집합(그 seed의 수집 에피소드, 각 앞 300 스텝)에서 잰 Q의 5 / 50 / 95 백분위가 update 전 snapshot에서 얼마나 움직였는가. '
-			 f'비교 대상은 처음 {WINDOW} update 안에서 Q(z, π(z))의 5–95 폭이 가장 큰 snapshot이다. 한쪽 끝의 이동이 다른 쪽의 {DOM:g}배 이상이면 그쪽 방향, 아니면 "양쪽으로".\n')
+	L.append(f'고정한 상태 집합(그 seed의 수집 에피소드, 각 50–349 스텝)에서 잰 Q의 5 / 50 / 95 백분위가 update 전 snapshot에서 얼마나 움직였는가. '
+			 f'비교 대상은 처음 {WINDOW} update 안에서 Q(z, π(z))의 5–95 폭이 가장 큰 snapshot이다. 폭이 {WIDEN:g}배 미만이면 "벌어지지 않음". 벌어졌으면 한쪽 끝의 이동이 다른 쪽의 {DOM:g}배 이상일 때 그쪽 방향, 아니면 "양쪽으로".\n')
 	for cell in CELLS:
 		R = [json.load(open(f)) for f in sorted(glob.glob(f'{a.out_root}/{cell}/s*/done.json'))]
 		if not R:
 			continue
 		L.append(f'\n## {SHORT[cell]}\n')
-		L.append('| seed | 수집 return | 비교 snapshot (update) | Q(z, π(z)): 5 / 50 / 95 백분위, 전 → 후 | 방향 (5 %, 95 % 이동) | Q(z, a)의 방향 | 편향 Q(z, a) − G, 전 → 후 | 그때까지 학습 에피소드 return |')
-		L.append('|---|---|---|---|---|---|---|---|')
+		L.append('| seed | 수집 return | 비교 snapshot (update) | Q(z, π(z)): 5 / 50 / 95 백분위, 전 → 후 | 폭 배율 | 방향 (5 %, 95 % 이동) | Q(z, a)의 방향 (폭 배율) | 편향 Q(z, a) − G, 전 → 후 | 그때까지 학습 에피소드 return |')
+		L.append('|---|---|---|---|---|---|---|---|---|')
 		S[cell] = []
 		for r in R:
 			sn = r['snapshots']
 			r0 = sn[0]
 			win = [s for s in sn[1:] if s['updates'] <= WINDOW] or sn[1:]
 			rk = max(win, key=lambda s: s['q_pi'][2] - s['q_pi'][0])
-			v_pi, lo_pi, hi_pi = direction(r0, rk, 'q_pi')
-			v_a, lo_a, hi_a = direction(r0, rk, 'q_a')
+			v_pi, lo_pi, hi_pi, w_pi = direction(r0, rk, 'q_pi')
+			v_a, lo_a, hi_a, w_a = direction(r0, rk, 'q_a')
 			rets = [round(o['ret']) for o in r['online'] if o['updates_end'] <= rk['updates'] + 500]
-			S[cell].append(dict(seed=r['seed'], snap=rk['updates'], dir_pi=v_pi, dir_a=v_a, d_pi=[lo_pi, hi_pi], d_a=[lo_a, hi_a], bias=[r0['bias_a'], rk['bias_a']]))
+			S[cell].append(dict(seed=r['seed'], snap=rk['updates'], dir_pi=v_pi, dir_a=v_a, width_pi=w_pi, width_a=w_a, d_pi=[lo_pi, hi_pi], d_a=[lo_a, hi_a], bias=[r0['bias_a'], rk['bias_a']]))
 			f3 = lambda q: ' / '.join(f'{x:.1f}' for x in q)
-			L.append(f'| {r["seed"]} | {np.mean(r["seed_returns"]):.0f} | {rk["updates"]} | {f3(r0["q_pi"])} → {f3(rk["q_pi"])} | **{v_pi}** ({lo_pi:+.1f}, {hi_pi:+.1f}) | {v_a} ({lo_a:+.1f}, {hi_a:+.1f}) | '
+			L.append(f'| {r["seed"]} | {np.mean(r["seed_returns"]):.0f} | {rk["updates"]} | {f3(r0["q_pi"])} → {f3(rk["q_pi"])} | {w_pi:.2f} | **{v_pi}** ({lo_pi:+.1f}, {hi_pi:+.1f}) | {v_a} ({w_a:.2f}) | '
 					 f'{r0["bias_a"]:+.1f} → {rk["bias_a"]:+.1f} | {rets} |')
 		vs = [x['dir_pi'] for x in S[cell]]
 		top = max(set(vs), key=vs.count)
@@ -190,7 +191,8 @@ if __name__ == '__main__':
 	p.add_argument('--steps', type=int, default=3000)
 	p.add_argument('--seed_steps', type=int, default=5000)
 	p.add_argument('--snap_every', type=int, default=250)
-	p.add_argument('--t_max', type=int, default=300)
+	p.add_argument('--t_min', type=int, default=50)
+	p.add_argument('--t_max', type=int, default=350)
 	p.add_argument('--out_root', default=OUT)
 	p = sub.add_parser('summarize')
 	p.add_argument('--out_root', default=OUT)
