@@ -1,0 +1,31 @@
+V0 ratio exact/pre nominal 1.118 pass
+== friction0.15
+G exact-pre                        +10.57e-3 [+2.71,+18.42] 이득 [4.1, 5.5, 8.1, 6.5, 23.3, 15.8]
+C con-exact                        -3.72e-3 [-5.49,-1.95] 아래 [-1.8, -3.3, -3.3, -3.3, -3.8, -6.9]
+C con-pre                          +6.85e-3 [-0.20,+13.89] 미결 [2.4, 2.2, 4.8, 3.2, 19.5, 9.0]
+ref adapted-pre                    +6.72e-3 [-1.49,+14.93] 미결 [0.8, -0.7, 4.8, 4.1, 20.5, 10.8]
+ref exact-adapted                  +3.85e-3 [+2.32,+5.38] 이득 [3.4, 6.2, 3.3, 2.4, 2.9, 5.0]
+ref con-adapted                    +0.12e-3 [-1.74,+1.98] 미결 [1.6, 2.9, -0.0, -0.9, -0.9, -1.8]
+ref restore: pre_true-pre_false    +3.92e-3 [-6.60,+14.45] 미결 [-0.3, -1.7, -0.6, 1.1, 24.3, 0.8]
+  pre            rew 32.52e-3 falls 1.09 fallsN 6 speed 0.550 smooth 1.322 effort 25.68 shake 1.221 per-robot rew [39.6, 39.0, 34.3, 36.5, 18.9, 26.8] falls [0, 0, 0, 0, 4, 2]
+  pre_norestore  rew 28.60e-3 falls 4.23 fallsN 17 speed 0.476 smooth 1.540 effort 26.02 shake 1.310 per-robot rew [39.9, 40.7, 34.9, 35.4, -5.4, 26.0] falls [0, 0, 0, 0, 15, 2]
+  adapted        rew 39.24e-3 falls 0.00 fallsN 0 speed 0.586 smooth 0.955 effort 23.25 shake 0.854 per-robot rew [40.4, 38.3, 39.1, 40.7, 39.3, 37.6] falls [0, 0, 0, 0, 0, 0]
+  exact          rew 43.09e-3 falls 0.00 fallsN 0 speed 0.588 smooth 1.224 effort 20.10 shake 0.513 per-robot rew [43.7, 44.5, 42.4, 43.0, 42.2, 42.7] falls [0, 0, 0, 0, 0, 0]
+  consensus      rew 39.37e-3 falls 0.00 fallsN 0 speed 0.588 smooth 1.422 effort 22.01 shake 0.737 per-robot rew [42.0, 41.2, 39.1, 39.7, 38.4, 35.8] falls [0, 0, 0, 0, 0, 0]
+  diag exact {'rho_model_exact': 0.261, 'rho_reward_head_env': 0.677, 'model_binds': 1.0, 'cand_fall_frac': 0.001}
+  diag consensus {'rho_model_exact': 0.151, 'rho_reward_head_env': 0.723, 'model_binds': 0.915, 'cand_fall_frac': 0.003}
+== motor0.4
+G exact-pre                        +35.77e-3 [+29.10,+42.44] 이득 [27.4, 28.7, 37.0, 42.2, 37.8, 41.5]
+C con-exact                        -3.76e-3 [-5.61,-1.92] 아래 [-1.7, -3.0, -2.8, -3.1, -5.7, -6.2]
+C con-pre                          +32.00e-3 [+26.29,+37.71] 위 [25.6, 25.6, 34.2, 39.1, 32.1, 35.3]
+ref adapted-pre                    +10.72e-3 [+3.91,+17.52] 이득 [11.7, 5.1, 11.4, 22.7, 6.9, 6.4]
+ref exact-adapted                  +25.05e-3 [+17.53,+32.57] 이득 [15.7, 23.5, 25.6, 19.5, 30.9, 35.1]
+ref con-adapted                    +21.29e-3 [+15.45,+27.13] 이득 [13.9, 20.5, 22.8, 16.4, 25.2, 28.9]
+ref restore: pre_true-pre_false    +2.14e-3 [-0.84,+5.12] 미결 [4.9, 2.9, -2.1, -0.7, 3.6, 4.3]
+  pre            rew 7.41e-3 falls 3.25 fallsN 18 speed 0.523 smooth 1.837 effort 20.96 shake 1.712 per-robot rew [14.5, 14.3, 6.0, 0.9, 6.1, 2.6] falls [3, 2, 3, 4, 3, 3]
+  pre_norestore  rew 5.27e-3 falls 4.95 fallsN 26 speed 0.483 smooth 2.061 effort 21.27 shake 1.749 per-robot rew [9.7, 11.3, 8.1, 1.6, 2.5, -1.7] falls [3, 2, 4, 5, 5, 7]
+  adapted        rew 18.12e-3 falls 3.68 fallsN 20 speed 0.493 smooth 1.597 effort 20.97 shake 1.380 per-robot rew [26.2, 19.4, 17.4, 23.7, 13.0, 9.0] falls [2, 3, 3, 1, 6, 5]
+  exact          rew 43.17e-3 falls 0.00 fallsN 0 speed 0.588 smooth 1.322 effort 17.48 shake 0.541 per-robot rew [41.9, 42.9, 43.1, 43.2, 43.9, 44.1] falls [0, 0, 0, 0, 0, 0]
+  consensus      rew 39.41e-3 falls 0.00 fallsN 0 speed 0.588 smooth 1.574 effort 18.72 shake 0.747 per-robot rew [40.1, 39.9, 40.2, 40.1, 38.2, 38.0] falls [0, 0, 0, 0, 0, 0]
+  diag exact {'rho_model_exact': 0.329, 'rho_reward_head_env': 0.53, 'model_binds': 0.918, 'cand_fall_frac': 0.0}
+  diag consensus {'rho_model_exact': 0.267, 'rho_reward_head_env': 0.594, 'model_binds': 0.903, 'cand_fall_frac': 0.0}
