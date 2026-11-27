@@ -10,6 +10,7 @@ Arms (no exploration noise, seed 3000 + s; same initial states across arms):
   CON    official MPPI loop; every candidate is scored by both agents (each with its own encoder, dynamics, reward and Q),
          score = min of the two relative scores (design 06's rule)
   MEAN   the same with the average of the two relative scores
+  ZCON   like CON, with each relative score first divided by its standard deviation over the candidates
   WMEAN  the same with a weighted average; weights are inversely proportional to each agent's mean absolute 100-step value
          residual on real data collected by the un-adapted planner (no tuned constant)
 Half of the policy-prior candidates come from each agent's policy.
@@ -39,8 +40,8 @@ OUT = '/mnt/newssd/cjkim/td/d12'
 CEIL = D07 + '/ceiling/{cell}/final.pt'
 CELLS = ['quadruped-run__motor_0.35', 'walker-run__friction_0.15']
 SHORT = {'quadruped-run__motor_0.35': 'quadruped 모터', 'walker-run__friction_0.15': 'walker 마찰'}
-ARMS = ['PRE', 'CEIL', 'CON', 'MEAN', 'WMEAN']
-ANAME = {'PRE': '적응 없음', 'CEIL': '전부 고친 agent', 'CON': '합의 (min)', 'MEAN': '평균', 'WMEAN': '검증 무게 평균'}
+ARMS = ['PRE', 'CEIL', 'CON', 'MEAN', 'WMEAN', 'ZCON']
+ANAME = {'PRE': '적응 없음', 'CEIL': '전부 고친 agent', 'CON': '합의 (min)', 'MEAN': '평균', 'WMEAN': '검증 무게 평균', 'ZCON': '표준화 합의 (min)'}
 # dynamics-only reference (exact dynamics + sim consensus): design 08 re-measurement for quadruped motor (same protocol), design 06 for walker friction
 DYN_REF = {'quadruped-run__motor_0.35': 571.0, 'walker-run__friction_0.15': 624.0}
 MARGIN, PASS_R = -25.0, 0.5
@@ -58,6 +59,9 @@ class Dual:
 	def score(self, j0, j1):
 		r0, r1 = j0 - j0.mean(0, keepdim=True), j1 - j1.mean(0, keepdim=True)
 		if self.rule == 'CON':
+			return torch.minimum(r0, r1), r0, r1
+		if self.rule == 'ZCON':                                               # each relative score divided by its spread over the candidates
+			r0, r1 = r0 / (r0.std(0, keepdim=True) + 1e-6), r1 / (r1.std(0, keepdim=True) + 1e-6)
 			return torch.minimum(r0, r1), r0, r1
 		w0, w1 = (0.5, 0.5) if self.rule == 'MEAN' else self.w
 		return w0 * r0 + w1 * r1, r0, r1
@@ -112,23 +116,24 @@ class Dual:
 		return a.clamp(-1, 1).cpu()
 
 
-def real_data(cell):
-	"""Real data collected by the un-adapted planner under the shifted physics (seeds 1-16): design 07's first round, else design 10's 10 episodes."""
+def real_data(cell, per_seed=5):
+	"""Real data collected by the un-adapted planner under the shifted physics (seeds 1-16, first 5 episodes each): design 07's first round, else design 10's data."""
 	ds = []
 	for s in range(1, 17):
 		for p in (f'{D07}/{cell}/s{s:02d}/data1.npz', f'{D10}/{cell}/s{s:02d}/data.npz'):
 			if os.path.exists(p):
-				ds.append(np.load(p))
+				d = np.load(p)
+				ds.append({k: d[k][:per_seed] for k in ('obs', 'act', 'rew')})
 				break
-	return {k: np.concatenate([d[k] for d in ds]) for k in ('obs', 'act', 'rew')}, len(ds)
+	return ds
 
 
 def weights(a0, a1, cell):
 	from d11 import q_stats
-	d, n = real_data(cell)
-	e = [float(q_stats(ag, d)['resid'].abs().mean()) for ag in (a0, a1)]      # mean over episodes of |episode-mean 100-step value residual|
+	ds = real_data(cell)
+	e = [float(torch.cat([q_stats(ag, d)['resid'] for d in ds]).abs().mean()) for ag in (a0, a1)]   # mean over episodes of |episode-mean 100-step value residual|, one seed's data at a time
 	inv = [1.0 / max(x, 1e-6) for x in e]
-	return (inv[0] / sum(inv), inv[1] / sum(inv)), e, n
+	return (inv[0] / sum(inv), inv[1] / sum(inv)), e, len(ds)
 
 
 def cmd_run(a):
@@ -254,7 +259,7 @@ def cmd_summarize(a):
 		if w:
 			L.append(f'\n- 검증 무게(얼린 agent, 전부 고친 agent): {w[0]:.2f}, {w[1]:.2f}')
 	L.append('\n## 관문 1\n')
-	for arm in ('CON', 'MEAN', 'WMEAN'):
+	for arm in ('CON', 'MEAN', 'WMEAN', 'ZCON'):
 		vs = [verd.get((c, arm), '(없음)') for c in CELLS]
 		S[f'gate1_{arm}'] = '통과' if all(v == '통과' for v in vs) else ('실패' if any(v == '실패' for v in vs) else '미결')
 		L.append(f'- {ANAME[arm]}: ' + ', '.join(f'{SHORT[c]} {v}' for c, v in zip(CELLS, vs)) + f' → **{S[f"gate1_{arm}"]}**')
