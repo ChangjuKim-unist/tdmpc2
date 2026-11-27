@@ -50,7 +50,7 @@ OLD = ['walker-run__mass_1.5', 'walker-run__friction_0.15', 'quadruped-run__fric
 	   'quadruped-run__motor_0.35', 'cheetah-run__friction_0.15']
 F_OLD = ['quadruped-run__motor_0.35', 'walker-run__friction_0.15']                 # F and SGFT also run on these two
 NEW_KINDS = [('quadruped-run', 'leg'), ('cheetah-run', 'leg'), ('walker-run', 'delay'), ('cheetah-run', 'delay')]
-LEVELS = {'leg': [0.5, 0.3, 0.15], 'delay': [1, 2]}                                 # weakest first
+LEVELS = {'leg': [0.5, 0.3, 0.15, 0.0], 'delay': [1, 2]}                               # weakest first
 LEG = {'quadruped-run': [0, 1, 2], 'cheetah-run': [0, 1, 2]}
 BAND = (0.4, 0.75)
 EVAL_EPS, NOM_EPS, EXACT_EPS = 10, 3, 2
