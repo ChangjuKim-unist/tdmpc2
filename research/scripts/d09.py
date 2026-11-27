@@ -296,6 +296,40 @@ def row(name, d):
 			f'{d["smooth"].mean():.2f} / {d["effort"].mean():.2f} / {d["angvel_rms"].mean():.2f} |')
 
 
+def trace(a, cell, k, planner):
+	"""Not registered (design 09 section F): episodes x metrics and per-step rewards of one planner from wherever the run is stored."""
+	E, R = [], []
+	d = run_dir(a.out_root, cell, k, 3, 'deploy', planner)
+	for f in sorted(glob.glob(f'{d}/s*.json')):
+		r = f'{d}/rec_{os.path.basename(f)[:-5]}.npz'
+		if os.path.exists(r):
+			E += json.load(open(f))['episodes']
+			R.append(np.load(r)['rew'])
+	if not E and k == 1:
+		if planner == 'PRE':
+			for s in range(1, 17):
+				f7, f10 = f'{a.d07_root}/{cell}/s{s:02d}', f'{a.d10_root}/{cell}/s{s:02d}'
+				if os.path.exists(f'{f7}/done.json') and os.path.exists(f'{f7}/rec_PRE.npz'):
+					E += json.load(open(f'{f7}/done.json'))['PRE']['shift']['episodes'][:2]
+					R.append(np.load(f'{f7}/rec_PRE.npz')['rew'][:2])
+				elif os.path.exists(f'{f10}/eval_PRE.json') and os.path.exists(f'{f10}/rec_PRE.npz'):
+					E += json.load(open(f'{f10}/eval_PRE.json'))['shift']['episodes']
+					R.append(np.load(f'{f10}/rec_PRE.npz')['rew'])
+		else:
+			root = a.d04_root if planner == 'ORA' else a.d06_root
+			f = f'{root}/{cell}/eval_{planner}.json'
+			if os.path.exists(f):
+				E += json.load(open(f))['episodes']
+				R.append(np.load(f'{root}/{cell}/rec_{planner}.npz')['rew'])
+	if not E:
+		return None
+	R = np.concatenate(R)
+	if len(R) != len(E):
+		return None
+	return dict(n=len(E), ret=float(np.mean([e['ret'] for e in E])), first100=float(R[:, :100].sum(1).mean()),
+				effort=float(np.mean([e['effort'] for e in E])), smooth=float(np.mean([e['smooth'] for e in E])))
+
+
 HEAD = ['| planner | return | 넘어짐 사건 / 넘어져 있는 시간 | 부드러움 / 노력 / 흔들림 |', '|---|---|---|---|']
 
 
@@ -466,6 +500,20 @@ def cmd_summarize(a):
 			true = float(np.mean([r['own'][n]['rew3_true'] for r in R]))
 			S[f'E/{cell}'][n] = dict(own=own, on_pre=onp, bias=bias, true=true)
 			L.append(f'| {ANAME[n]} | {own["mean"]:.2f} [{own["t"][0]:.2f}, {own["t"][1]:.2f}] | {onp["mean"]:.2f} | {fmt(bias, 2)} ({true:.2f}) |')
+	# ---- F: mechanism traces (not registered)
+	L.append('\n## F. 기전의 흔적: 여섯 조건 × 체크포인트 (등록 안 함)\n')
+	L.append('값은 "적응 없음 / 정확한 dynamics만 / 정확한 dynamics + sim 합의"다. 첫 100 스텝 보상은 에피소드 첫 100 결정 스텝의 보상 합이다. 체크포인트 1의 일부는 설계 04, 06, 07, 10의 기록이라 planner 사이에 에피소드가 짝이 아니다(에피소드 수를 적는다).\n')
+	L.append('| 조건 | 체크포인트 | 에피소드 수 | return | 첫 100 스텝 보상 | 노력 | 부드러움 |')
+	L.append('|---|---|---|---|---|---|---|')
+	S['F'] = {}
+	for cell in [CF] + OTHER:
+		for k in (1, 2, 3):
+			T = [trace(a, cell, k, p) for p in ('PRE', 'ORA', 'CONORA')]
+			if T[0] is None or T[1] is None:
+				continue
+			S['F'][f'{cell}/k{k}'] = dict(PRE=T[0], ORA=T[1], CONORA=T[2])
+			col = lambda key, d: ' / '.join('–' if t is None else f'{t[key]:.{d}f}' for t in T)
+			L.append(f'| {SHORT[cell]} | {k} | {col("n", 0)} | {col("ret", 0)} | {col("first100", 0)} | {col("effort", 2)} | {col("smooth", 2)} |')
 	os.makedirs(a.res_dir, exist_ok=True)
 	open(f'{a.res_dir}/summary.md', 'w').write('\n'.join(L) + '\n')
 	dump(f'{a.res_dir}/summary.json', S)
@@ -500,5 +548,8 @@ if __name__ == '__main__':
 	p.add_argument('--d08_root', default=D08)
 	p.add_argument('--out_root', default=OUT)
 	p.add_argument('--res_dir', default=f'{OUT}/res')
+	p.add_argument('--d04_root', default='/mnt/newssd/cjkim/td/d04')
+	p.add_argument('--d06_root', default='/mnt/newssd/cjkim/td/d06')
+	p.add_argument('--d10_root', default='/mnt/newssd/cjkim/td/d10')
 	a = ap.parse_args()
 	dict(run=cmd_run, selferr=cmd_selferr, summarize=cmd_summarize)[a.cmd](a)
