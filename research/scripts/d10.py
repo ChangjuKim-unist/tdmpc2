@@ -176,6 +176,129 @@ def cmd_run(a):
 	print(a.cell, s, 'done', a.arms, flush=True)
 
 
+# ----------------------------------------------------------------------------- summary (registered analysis, design 10 §5)
+
+def interval(x):
+	x = np.asarray(x, float)
+	n = len(x)
+	if n < 2:
+		return dict(mean=float(x.mean()) if n else float('nan'), t=[float('nan')] * 2, n=n)
+	if n - 1 in TQ:
+		q = TQ[n - 1]
+	else:
+		from scipy import stats
+		q = float(stats.t.ppf(0.975, n - 1))
+	h = q * x.std(ddof=1) / np.sqrt(n)
+	return dict(mean=float(x.mean()), t=[float(x.mean() - h), float(x.mean() + h)], n=n)
+
+
+def fmt(iv):
+	if not np.isfinite(iv['t'][0]):
+		return f'{iv["mean"]:+.1f} (seed {iv["n"]}개)'
+	return f'{iv["mean"]:+.1f} [{iv["t"][0]:+.1f}, {iv["t"][1]:+.1f}]'
+
+
+def harm(iv):
+	lo, hi = iv['t']
+	if not np.isfinite(lo):
+		return '(없음)'
+	return '통과' if lo > MARGIN else ('실패' if hi < MARGIN else '미결')
+
+
+def cmd_summarize(a):
+	L, S = [], dict(cells={})
+	L.append('# 설계 10 결과 요약 (자동 생성, `d10.py summarize`)\n')
+	L.append('모든 장치가 같은 적응 모델(적응 없는 planner가 모은 실데이터 10 에피소드, sim 혼합 fine-tuning)을 쓴다. 값은 바뀐 조건 return이고, 구간은 seed 단위 t 구간 95 %다. "해 없음"은 (장치 − 적응 없음)의 구간 아래 끝이 −25 위일 때 통과, 위 끝이 −25 아래일 때 실패다.\n')
+	K = ('ret', 'falls', 'fallen_frac', 'smooth', 'effort', 'angvel_rms')
+	gain, nomr, val = {}, {}, {}
+	for cell in CELLS:
+		R = {}
+		for f in sorted(glob.glob(f'{a.out_root}/{cell}/s*/eval_*.json')):
+			s, arm = int(f.split('/')[-2][1:]), os.path.basename(f)[5:-5]
+			R.setdefault(arm, {})[s] = json.load(open(f))
+		if 'PRE' not in R:
+			continue
+		sm = lambda arm, s, c='shift', k='ret': float(np.mean([e[k] for e in R[arm][s][c]['episodes']]))
+		L.append(f'\n## {SHORT[cell]} ({cell})\n')
+		L.append('| 장치 | seed 수 | return | − 적응 없음 | 해 없음 | 넘어짐 사건 / 넘어져 있는 시간 | 부드러움 / 노력 / 흔들림 | 평소 조건 return (적응 없음 대비) | sim 쪽이 정한 비율 |')
+		L.append('|---|---|---|---|---|---|---|---|---|')
+		S['cells'][cell] = {}
+		for arm in ['PRE'] + DEVICES:
+			if arm not in R:
+				continue
+			seeds = sorted(set(R[arm]) & set(R['PRE']))
+			m = {k: float(np.mean([sm(arm, s, 'shift', k) for s in seeds])) for k in K}
+			iv = interval([sm(arm, s) - sm('PRE', s) for s in seeds])
+			nom, nom0 = float(np.mean([sm(arm, s, 'nominal') for s in seeds])), float(np.mean([sm('PRE', s, 'nominal') for s in seeds]))
+			sb = [R[arm][s].get('sim_binds') for s in seeds]
+			sb = [v for v in sb if v is not None]
+			S['cells'][cell][arm] = dict(n=len(seeds), **m, diff=iv, nominal=nom, nominal_ratio=nom / nom0, sim_binds=float(np.mean(sb)) if sb else None)
+			val[cell, arm] = {s: sm(arm, s) for s in seeds}
+			if arm != 'PRE':
+				gain[cell, arm], nomr[cell, arm] = iv, nom / nom0
+			L.append(f'| {DNAME[arm]} | {len(seeds)} | {m["ret"]:.0f} | {"–" if arm == "PRE" else fmt(iv)} | {"–" if arm == "PRE" else harm(iv)} | {m["falls"]:.1f} / {m["fallen_frac"]:.2f} | '
+					 f'{m["smooth"]:.2f} / {m["effort"]:.2f} / {m["angvel_rms"]:.2f} | {nom:.0f} ({nom / nom0:.2f}) | {"–" if not sb else f"{np.mean(sb):.2f}"} |')
+	cells = [c for c in CELLS if c in S['cells']]
+
+	L.append('\n## 주 판정 N "해 없음"과 보존 V0 (장치마다)\n')
+	L.append('| 장치 | ' + ' | '.join(SHORT[c] for c in cells) + ' | N | V0 (평소 조건 0.9배 이상) | 여섯 조건 평균 이득 | 가장 나쁜 조건의 이득 |')
+	L.append('|---|' + '---|' * (len(cells) + 4))
+	S['N'], S['V0'], S['mean_gain'], S['worst_gain'] = {}, {}, {}, {}
+	for arm in DEVICES:
+		if not all((c, arm) in gain for c in cells) or len(cells) < len(CELLS):
+			row = [harm(gain[c, arm]) if (c, arm) in gain else '(없음)' for c in cells]
+			L.append(f'| {DNAME[arm]} | ' + ' | '.join(row) + ' | (조건 부족) | | | |')
+			continue
+		h = [harm(gain[c, arm]) for c in cells]
+		n = '통과' if all(v == '통과' for v in h) else ('실패' if any(v == '실패' for v in h) else '미결')
+		v0 = all(nomr[c, arm] >= V0_RATIO for c in cells)
+		mg, wg = float(np.mean([gain[c, arm]['mean'] for c in cells])), min(gain[c, arm]['mean'] for c in cells)
+		S['N'][arm], S['V0'][arm], S['mean_gain'][arm], S['worst_gain'][arm] = n, bool(v0), mg, float(wg)
+		L.append(f'| {DNAME[arm]} | ' + ' | '.join(f'{v} ({gain[c, arm]["mean"]:+.0f})' for v, c in zip(h, cells)) + f' | **{n}** | {"예" if v0 else "아니오"} | {mg:+.1f} | {wg:+.1f} |')
+
+	def pair(x, y, c):
+		if (c, x) not in val or (c, y) not in val:
+			return None
+		seeds = sorted(set(val[c, x]) & set(val[c, y]))
+		return interval([val[c, x][s] - val[c, y][s] for s in seeds])
+
+	L.append('\n## 보조 C: 조합 (합의 + 벌점 1)과 두 부모\n')
+	L.append('| 조건 | 조합 − 합의 | 조합 − 벌점 1 | 합의 − 벌점 1 |')
+	L.append('|---|---|---|---|')
+	S['C'], below = {}, False
+	for c in cells:
+		ivs = [pair('CONPEN1', 'CON', c), pair('CONPEN1', 'PEN1', c), pair('CON', 'PEN1', c)]
+		if None in ivs:
+			continue
+		S['C'][c] = dict(vs_con=ivs[0], vs_pen=ivs[1], con_vs_pen=ivs[2])
+		better = ivs[0] if ivs[2]['mean'] >= 0 else ivs[1]                    # the comparison with the better parent in this condition
+		below = below or (np.isfinite(better['t'][1]) and better['t'][1] < 0)
+		L.append(f'| {SHORT[c]} | {fmt(ivs[0])} | {fmt(ivs[1])} | {fmt(ivs[2])} |')
+	if all(k in S['mean_gain'] for k in ('CONPEN1', 'CON', 'PEN1')):
+		mg = S['mean_gain']
+		wins = mg['CONPEN1'] > mg['CON'] and mg['CONPEN1'] > mg['PEN1'] and not below
+		S['combo_wins'] = bool(wins)
+		L.append(f'\n- 여섯 조건 평균 이득: 조합 {mg["CONPEN1"]:+.1f}, 합의 {mg["CON"]:+.1f}, 벌점 1 {mg["PEN1"]:+.1f}. 더 좋은 부모보다 구간 전체가 아래인 조건: {"있음" if below else "없음"}.')
+		L.append(f'- **"조합이 둘을 이긴다": {"그렇다" if wins else "아니다"}**')
+
+	L.append('\n## 보조 S: 벌점 계수에 대한 민감도 (조건별 평균 return)\n')
+	L.append('| 조건 | 벌점 0.3 / 1 / 3 | 가장 좋은 계수 | 계수 사이 최대 차이 | 합의 + 벌점 0.3 / 1 / 3 | 계수 사이 최대 차이 |')
+	L.append('|---|---|---|---|---|---|')
+	S['S'] = {}
+	for c in cells:
+		g = lambda arm: S['cells'][c].get(arm, {}).get('ret')
+		pv, cv = [g(f'PEN{l}') for l in ('0.3', '1', '3')], [g(f'CONPEN{l}') for l in ('0.3', '1', '3')]
+		if None in pv or None in cv:
+			continue
+		best = ('0.3', '1', '3')[int(np.argmax(pv))]
+		S['S'][c] = dict(pen=pv, conpen=cv, best=best, pen_range=max(pv) - min(pv), conpen_range=max(cv) - min(cv))
+		L.append(f'| {SHORT[c]} | ' + ' / '.join(f'{v:.0f}' for v in pv) + f' | {best} | {max(pv) - min(pv):.0f} | ' + ' / '.join(f'{v:.0f}' for v in cv) + f' | {max(cv) - min(cv):.0f} |')
+	os.makedirs(a.res_dir, exist_ok=True)
+	open(f'{a.res_dir}/summary.md', 'w').write('\n'.join(L) + '\n')
+	dump(f'{a.res_dir}/summary.json', S)
+	print('\n'.join(L))
+
+
 if __name__ == '__main__':
 	ap = argparse.ArgumentParser()
 	sub = ap.add_subparsers(dest='cmd', required=True)
@@ -198,4 +321,4 @@ if __name__ == '__main__':
 	if a.cmd == 'run':
 		cmd_run(a)
 	else:
-		raise SystemExit('summarize: added with the registration commit')
+		cmd_summarize(a)
