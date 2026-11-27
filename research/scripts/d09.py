@@ -4,6 +4,7 @@ One process = one (cell, pretrained checkpoint, horizon, protocol, planner), loo
   planner  PRE     official planner, pretrained (sim) model
            ORA     design-04 planner: candidates rolled out in the true simulator, pretrained Q at the true state
            CONORA  design-06 consensus of the sim model and the exact rollout
+           ORAPEN  ORA with the FOWM penalty of design 02 (lam x std of the Q ensemble) at the true states (--lam 1|3)
   proto    deploy  shifted physics, no exploration noise, seed 3000 + s   (design 07 evaluation protocol)
            collect shifted physics, exploration noise on, seed 5000 + s   (design 08 round-3 protocol)
            nominal nominal physics, no exploration noise, seed 3000 + s
@@ -63,6 +64,56 @@ def make_h(task, ckpt=1, horizon=3, seed=1):
 	return cfg, env, agent
 
 
+def _wroll_all(args):
+	"""Worker: like d04._wroll but returns the observation after every step (N x H x D)."""
+	import d04
+	state, seqs = args
+	R = np.empty((len(seqs), seqs.shape[1]), np.float32)
+	O = []
+	for i, s in enumerate(seqs):
+		outs, rews = d04._W.rollout_r(state, s)
+		R[i] = rews
+		O.append(outs)
+	return R, np.asarray(O, np.float32)
+
+
+def oracle_pen(agent, env, pool, workers, lam):
+	from d04 import Oracle
+
+	class OraclePen(Oracle):
+		"""ORA with design 02's FOWM penalty: every step of the exact rollout and the terminal value lose lam x std of the Q ensemble."""
+
+		@torch.no_grad()
+		def values(self, state, actions):
+			cfg, m = self.cfg, self.m
+			seqs = actions.permute(1, 0, 2).cpu().numpy().astype(np.float32)
+			chunks = [c for c in np.array_split(seqs, self.W) if len(c)]
+			outs = self.pool.map(_wroll_all, [(state, c) for c in chunks], chunksize=1)
+			R = torch.as_tensor(np.concatenate([o[0] for o in outs]), dtype=torch.float32, device='cuda')
+			O = torch.as_tensor(np.concatenate([o[1] for o in outs]), dtype=torch.float32, device='cuda')
+			z = self.z0.repeat(R.shape[0], 1)
+			G, disc = 0, 1
+			for t in range(cfg.horizon):
+				u = tdmath.two_hot_inv(m.Q(z, actions[t], None, return_type='all'), cfg).std(0)
+				G = G + disc * (R[:, t:t + 1] - lam * u)
+				disc = disc * self.gamma
+				z = m.encode(O[:, t], None)
+			action, _ = m.pi(z, None)
+			u = tdmath.two_hot_inv(m.Q(z, action, None, return_type='all'), cfg).std(0)
+			return G + disc * (m.Q(z, action, None, return_type='avg') - lam * u)
+
+		@torch.no_grad()
+		def act(self, obs, t0=False, eval_mode=False):
+			self.z0 = self.m.encode(obs.to('cuda').unsqueeze(0), None)
+			return super().act(obs, t0=t0, eval_mode=eval_mode)
+
+	return OraclePen(agent, env, pool, workers)
+
+
+def pname(a):
+	return f'ORAPEN{a.lam:g}' if a.planner == 'ORAPEN' else a.planner
+
+
 def run_dir(root, cell, ckpt, horizon, proto, planner):
 	base = f'{root}/nominal/{cell_parts(cell)[0]}' if proto == 'nominal' else f'{root}/{cell}'
 	return f'{base}/k{ckpt}_h{horizon}_{proto}_{planner}'
@@ -71,7 +122,7 @@ def run_dir(root, cell, ckpt, horizon, proto, planner):
 def cmd_run(a):
 	task, cond = cell_parts(a.cell)
 	real = 'nominal' if a.proto == 'nominal' else cond
-	folder = run_dir(a.out_root, a.cell, a.ckpt, a.horizon, a.proto, a.planner)
+	folder = run_dir(a.out_root, a.cell, a.ckpt, a.horizon, a.proto, pname(a))
 	os.makedirs(folder, exist_ok=True)
 	pool = None
 	if a.planner != 'PRE':
@@ -84,14 +135,14 @@ def cmd_run(a):
 	else:
 		from d04 import Oracle
 		from d06 import OracleCon
-		actor = (Oracle if a.planner == 'ORA' else OracleCon)(agent, env, pool, a.workers)
+		actor = oracle_pen(agent, env, pool, a.workers, a.lam) if a.planner == 'ORAPEN' else (Oracle if a.planner == 'ORA' else OracleCon)(agent, env, pool, a.workers)
 	if a.timing:
 		shifter.set(real)
 		obs = env.reset()
 		tic = time.time()
 		for i in range(a.timing):
 			actor.act(obs, t0=i == 0, eval_mode=True)
-		print(a.cell, a.planner, f'k{a.ckpt} h{a.horizon}', f'{(time.time() - tic) / a.timing:.3f} s/plan', flush=True)
+		print(a.cell, pname(a), f'k{a.ckpt} h{a.horizon}', f'{(time.time() - tic) / a.timing:.3f} s/plan', flush=True)
 		return
 	base = 5000 if a.proto == 'collect' else 3000
 	for s in range(a.seed_from, a.seed_to + 1):
@@ -102,7 +153,7 @@ def cmd_run(a):
 		np.savez_compressed(f'{folder}/rec_s{s:02d}.npz', state0=np.stack([np.asarray(r['state'][0]) for r in recs]),
 							rew=np.stack([np.asarray(r['rew'], np.float32) for r in recs]))
 		dump(f'{folder}/s{s:02d}.json', dict(cell=a.cell, seed=s, args=vars(a), summary=summary(eps), episodes=eps, seconds=time.time() - t0))
-		print(a.cell, a.planner, f'k{a.ckpt} h{a.horizon} {a.proto}', s, {k: round(v, 2) for k, v in summary(eps).items()}, f'{time.time() - t0:.0f}s', flush=True)
+		print(a.cell, pname(a), f'k{a.ckpt} h{a.horizon} {a.proto}', s, {k: round(v, 2) for k, v in summary(eps).items()}, f'{time.time() - t0:.0f}s', flush=True)
 	if pool is not None:
 		pool.close()
 
@@ -276,6 +327,25 @@ def cmd_summarize(a):
 		b = blocks(a, CF, 1, 3, 'deploy', 'ORA', S16, 2)
 		if b:
 			L.append('- ORA의 100 step 구간별 reward 합: ' + ' / '.join(f'{v:.0f}' for v in b))
+	L.append('\n### A3 정확한 dynamics + 가치 불확실성 벌점 (배치 규약, seed 16개 × 에피소드 2개)\n')
+	pre, ora, con = (get(a, CF, 1, 3, 'deploy', p, S16, 2) for p in ('PRE', 'ORA', 'CONORA'))
+	S['A3'] = {}
+	for lam in (1, 3):
+		pen = get(a, CF, 1, 3, 'deploy', f'ORAPEN{lam}', S16, 2)
+		if pen is None or pre is None or ora is None:
+			L.append(f'- 벌점 계수 {lam}: (결과 없음)')
+			continue
+		if not S['A3']:
+			L.extend(HEAD)
+		L.append(row(f'ORA + 벌점 (계수 {lam})', pen))
+		S['A3'][lam] = {nm: interval(sm(x) - sm(y)) for nm, x, y in (('− ORA', pen, ora), ('− PRE', pen, pre)) + ((('CON-ORA −', con, pen),) if con is not None else ())}
+	if S['A3']:
+		L.append('\n| 비교 (같은 에피소드끼리 짝) | 평균 [t 구간 95 %] | 판정 |')
+		L.append('|---|---|---|')
+		for lam, d in S['A3'].items():
+			for nm, iv in d.items():
+				lab = f'CON-ORA − (ORA + 벌점 {lam})' if nm.startswith('CON') else f'(ORA + 벌점 {lam}) {nm}'
+				L.append(f'| {lab} | {fmt(iv)} | {three(iv)} |')
 	ora_c = get(a, CF, 1, 3, 'collect', 'ORA', S16, 2)
 	L.append('\n### A2 수집 규약 (탐색 잡음 켬, seed 16개 × 에피소드 2개)\n')
 	if ora_c is None:
@@ -397,7 +467,8 @@ if __name__ == '__main__':
 	sub = ap.add_subparsers(dest='cmd', required=True)
 	p = sub.add_parser('run')
 	p.add_argument('--cell', required=True)
-	p.add_argument('--planner', choices=['PRE', 'ORA', 'CONORA'], required=True)
+	p.add_argument('--planner', choices=['PRE', 'ORA', 'CONORA', 'ORAPEN'], required=True)
+	p.add_argument('--lam', type=float, default=1.0)
 	p.add_argument('--ckpt', type=int, default=1)
 	p.add_argument('--horizon', type=int, default=3)
 	p.add_argument('--proto', choices=['deploy', 'collect', 'nominal'], default='deploy')
