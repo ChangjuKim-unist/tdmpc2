@@ -39,21 +39,23 @@ D12, D13 = '/mnt/newssd/cjkim/td/d12', '/mnt/newssd/cjkim/td/d13'
 OUT = '/mnt/newssd/cjkim/td/d17'
 SEEDS, STEPS = (1, 2, 3), (10000, 20000, 30000, 40000, 50000, 60000)
 DYN_REF, MARGIN, DEPTH, AUC_PASS = 571.0, -25.0, 0.25, 0.9
+REFS = {'quadruped-run__motor_0.35': 571.0, 'walker-run__friction_0.15': 624.0}    # dynamics-only references (design 12)
+THR = 0.3                                                                          # §11: handover threshold on S2, fixed from §10 before the FRZ arm
 
 
-def ckpt(seed, step):
-	return f'{D13}/{CELL}/RAW_s{seed}/step{step}.pt'
+def ckpt(seed, step, cell=CELL):
+	return f'{D13}/{cell}/RAW_s{seed}/step{step}.pt'
 
 
-def labels():
+def labels(cell=CELL):
 	"""Registered labels from design 13's own evaluations (10 episodes): collapsed if below (1 - 0.25) x the run's pre-training evaluation,
-	recovered if at or above the dynamics-only reference 571, otherwise unlabelled."""
+	recovered if at or above the dynamics-only reference (571 quadruped motor, 624 walker friction), otherwise unlabelled."""
 	out = {}
 	for s in SEEDS:
-		ev = {e['step']: e['ret'] for e in json.load(open(f'{D13}/{CELL}/RAW_s{s}/log.json'))['evals']}
+		ev = {e['step']: e['ret'] for e in json.load(open(f'{D13}/{cell}/RAW_s{s}/log.json'))['evals']}
 		for k in STEPS:
 			r = ev[k]
-			out[s, k] = dict(solo_d13=r, pre_d13=ev[0], label='collapsed' if r < (1 - DEPTH) * ev[0] else ('recovered' if r >= DYN_REF else 'between'))
+			out[s, k] = dict(solo_d13=r, pre_d13=ev[0], label='collapsed' if r < (1 - DEPTH) * ev[0] else ('recovered' if r >= REFS[cell] else 'between'))
 	return out
 
 
@@ -87,6 +89,73 @@ def cmd_run(a):
 		out = dict(cell=CELL, run_seed=a.seed, step=a.step, arm=a.arm, seed=s, args=vars(a), summary=summary(eps), episodes=eps, signals=sig, seconds=time.time() - t0)
 		dump(f'{folder}/s{s:02d}.json', out)
 		print(a.seed, a.step, a.arm, s, {k: round(v, 2) for k, v in summary(eps).items()}, {k: round(v, 3) for k, v in sig.items()}, f'{time.time() - t0:.0f}s', flush=True)
+
+
+def cmd_frz(a):
+	"""§11: the frozen agent acts (as in the first phase of the next method); every checkpoint only scores the recorded episodes."""
+	task, cond = cell_parts(a.cell)
+	folder = f'{a.out_root}/{a.cell}/FRZ'
+	os.makedirs(folder, exist_ok=True)
+	cfg, env, frozen = make(task, compile_=False)
+	shifter, domain = Shifter(phys_of(env)), domain_of(task)
+	recs = {}
+	for s in range(a.seed_from, a.seed_to + 1):
+		t0 = time.time()
+		eps, r = run_cond(frozen, env, shifter, domain, cond, a.eps, eval_mode=True, seed=3000 + s, record=True)
+		recs[s] = r
+		dump(f'{folder}/episodes_s{s:02d}.json', dict(seed=s, summary=summary(eps), episodes=eps, seconds=time.time() - t0))
+		print(a.cell, 'FRZ', s, {k: round(v, 2) for k, v in summary(eps).items()}, f'{time.time() - t0:.0f}s', flush=True)
+	learner = fresh(cfg)
+	for rs in SEEDS:
+		for k in STEPS:
+			learner.load(ckpt(rs, k, a.cell))
+			with torch.no_grad():
+				sig = {s: signals(learner, frozen, recs[s]) for s in recs}
+			dump(f'{folder}/RAW_s{rs}_step{k}.json', dict(cell=a.cell, run_seed=rs, step=k, signals=sig))
+			print(a.cell, 'FRZ signals', rs, k, {n: round(float(np.mean([v[n] for v in sig.values()])), 3) for n in ('S2', 'S3')}, flush=True)
+
+
+def cmd_summarize_frz(a):
+	"""§11 (registered after §10): S2 and S3 measured on the frozen agent's episodes, both cells; threshold THR fixed beforehand."""
+	L, S = ['# 설계 17 §11 결과 요약: 얼린 agent가 움직인 에피소드에서 잰 신호 (자동 생성, `d17.py summarize_frz`)\n'], {}
+	L.append(f'꼬리표는 설계 13의 평가로 정한다(학습 전의 {1 - DEPTH:.2f}배 미만이면 "꺼짐", dynamics만 고친 기준 이상이면 "회복"). 문턱 {THR}은 §10에서 본 값으로 미리 고정했다. '
+			 '"스텝만" AUROC는 스텝이 작을수록 꺼짐이라고 보는 규칙의 AUROC다(등록 안 함, 비교용).\n')
+	for cell in REFS:
+		lab = labels(cell)
+		rows = {}
+		for (rs, k), v in lab.items():
+			f = f'{a.out_root}/{cell}/FRZ/RAW_s{rs}_step{k}.json'
+			if os.path.exists(f):
+				sg = json.load(open(f))['signals']
+				rows[rs, k] = dict(**v, S2=float(np.mean([x['S2'] for x in sg.values()])), S3=float(np.mean([x['S3'] for x in sg.values()])))
+		if not rows:
+			continue
+		col = [v for v in rows.values() if v['label'] == 'collapsed']
+		rec = [v for v in rows.values() if v['label'] == 'recovered']
+		ck = [k for (rs, k), v in rows.items() if v['label'] == 'collapsed']
+		rk = [k for (rs, k), v in rows.items() if v['label'] == 'recovered']
+		au2, au3, aus = auroc([v['S2'] for v in col], [v['S2'] for v in rec]), auroc([v['S3'] for v in col], [v['S3'] for v in rec]), auroc([-k for k in ck], [-k for k in rk])
+		f1 = '가른다' if au2 >= AUC_PASS else '못 가른다'
+		all_hi = all(v['S2'] >= THR for v in col)
+		n_lo = sum(v['S2'] < THR for v in rec)
+		f2 = '가른다' if all_hi and n_lo * 2 >= len(rec) else '못 가른다'
+		S[cell] = dict(n_collapsed=len(col), n_recovered=len(rec), auroc_S2=au2, auroc_S3=au3, auroc_step=aus, F1=f1, collapsed_all_above=all_hi,
+					   recovered_below=n_lo, F2=f2, rows={f's{rs}_{k}': v for (rs, k), v in rows.items()})
+		L.append(f'\n## {cell}\n')
+		L.append(f'- 꺼짐 {len(col)}개, 회복 {len(rec)}개. AUROC: S2 {au2:.2f}, S3 {au3:.2f}, 스텝만 {aus:.2f}')
+		L.append(f'- **F1 (S2 AUROC {AUC_PASS} 이상): {f1}.** **F2 (문턱 {THR}): {f2}** (꺼짐이 모두 문턱 이상: {"예" if all_hi else "아니오"}, 회복 중 문턱 미만 {n_lo} / {len(rec)})\n')
+		L.append('| seed | ' + ' | '.join(f'{k // 1000}k' for k in STEPS) + ' |')
+		L.append('|---|' + '---|' * len(STEPS))
+		mark = {'collapsed': '꺼짐', 'recovered': '회복', 'between': '사이'}
+		for rs in SEEDS:
+			L.append(f'| {rs} | ' + ' | '.join(f'{rows[rs, k]["S2"]:.3f} ({mark[rows[rs, k]["label"]]}, {rows[rs, k]["solo_d13"]:.0f})' if (rs, k) in rows else '–' for k in STEPS) + ' |')
+	S['both_F2'] = all(S.get(c, {}).get('F2') == '가른다' for c in REFS)
+	S['both_F1'] = all(S.get(c, {}).get('F1') == '가른다' for c in REFS)
+	L.append(f'\n- **두 조건 모두 F1: {"예" if S["both_F1"] else "아니오"}, 두 조건 모두 F2: {"예" if S["both_F2"] else "아니오"}**')
+	os.makedirs(a.res_dir, exist_ok=True)
+	open(f'{a.res_dir}/frz.md', 'w').write('\n'.join(L) + '\n')
+	dump(f'{a.res_dir}/frz.json', S)
+	print('\n'.join(L))
 
 
 # ----------------------------------------------------------------------------- summary (registered analysis, design 17 §4)
@@ -182,8 +251,15 @@ if __name__ == '__main__':
 	p.add_argument('--seed_to', type=int, default=16)
 	p.add_argument('--eps', type=int, default=2)
 	p.add_argument('--out_root', default=OUT)
-	p = sub.add_parser('summarize')
+	p = sub.add_parser('frz')
+	p.add_argument('--cell', choices=list(REFS), required=True)
+	p.add_argument('--seed_from', type=int, default=1)
+	p.add_argument('--seed_to', type=int, default=16)
+	p.add_argument('--eps', type=int, default=2)
 	p.add_argument('--out_root', default=OUT)
-	p.add_argument('--res_dir', default=f'{OUT}/res')
+	for name in ('summarize', 'summarize_frz'):
+		p = sub.add_parser(name)
+		p.add_argument('--out_root', default=OUT)
+		p.add_argument('--res_dir', default=f'{OUT}/res')
 	a = ap.parse_args()
-	dict(run=cmd_run, summarize=cmd_summarize)[a.cmd](a)
+	dict(run=cmd_run, summarize=cmd_summarize, frz=cmd_frz, summarize_frz=cmd_summarize_frz)[a.cmd](a)
